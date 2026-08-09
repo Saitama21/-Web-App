@@ -255,13 +255,44 @@ function parsePrice(text) {
   }
   return null;
 }
-function normalizeImage(value, baseUrl='') {
-  let v = value;
-  if (Array.isArray(v)) v = v[0];
-  if (v && typeof v === 'object') v = first(v.url, v.original, v.src, v.contentUrl, v.image);
-  v = cleanText(v);
-  if (!v || v.startsWith('data:')) return '';
-  try { return new URL(v, baseUrl).href; } catch { return ''; }
+function normalizeImage(value, baseUrl='', depth=0) {
+  if (depth > 8 || value === undefined || value === null) return '';
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const found = normalizeImage(entry, baseUrl, depth + 1);
+      if (found) return found;
+    }
+    return '';
+  }
+
+  if (typeof value === 'object') {
+    const preferredKeys = [
+      'original','base_action','big_tile','big','large','full','zoom',
+      'preview','medium','small','url','src','href','contentUrl','image','photo','picture'
+    ];
+    for (const key of preferredKeys) {
+      if (Object.prototype.hasOwnProperty.call(value, key)) {
+        const found = normalizeImage(value[key], baseUrl, depth + 1);
+        if (found) return found;
+      }
+    }
+    for (const nested of Object.values(value)) {
+      if (nested && typeof nested === 'object') {
+        const found = normalizeImage(nested, baseUrl, depth + 1);
+        if (found) return found;
+      }
+    }
+    return '';
+  }
+
+  const v = cleanText(value);
+  if (!v || v.startsWith('data:') || /\[object(?:%20|\s)+Object\]/i.test(v)) return '';
+  try {
+    const u = new URL(v, baseUrl);
+    if (!['http:','https:'].includes(u.protocol)) return '';
+    return u.href;
+  } catch { return ''; }
 }
 function domainInfo(rawUrl) {
   try {
@@ -407,7 +438,14 @@ async function rozetkaApiFallback(productUrl) {
       const result = mergeProduct({
         title: usableTitle(first(root?.title, root?.name, productSchema?.name)),
         price: numericPrice(first(root?.price, root?.price_value, root?.price_pcs, productSchema?.offers?.price)),
-        image: normalizeImage(first(root?.images, root?.image, root?.photo, root?.photo_preview, productSchema?.image), productUrl),
+        image: normalizeImage(first(
+          root?.images,
+          root?.docket?.images,
+          root?.image,
+          root?.photo,
+          root?.photo_preview,
+          productSchema?.image
+        ), productUrl),
         canonicalUrl: productUrl,
         source:['rozetka-api']
       }, {...best, source:['rozetka-api-scan']});
@@ -443,6 +481,7 @@ function inferCategoryFromTitle(title='', domain='') {
   if (STORE_CONFIG[domain]?.category) return STORE_CONFIG[domain].category;
   // Rozetka is a marketplace: infer only when the title is obvious.
   const t = String(title).toLowerCase();
+  if (/викрут|отв[её]ртк|шурупов|дрел|перфорат|набір\s+інструмент|набор\s+инструмент|tool\s*kit|screwdriver|dremel|паяльн/.test(t)) return 'Инструменты';
   if (/iphone|macbook|ноутбук|смартфон|телефон|навушник|наушник|зарядн|bluetti|power station|камера|фотоапарат|телевізор|телевизор/.test(t)) return 'Техника';
   if (/кросів|кроссов|черевик|ботин|converse|одяг|одежд|футболк|куртк/.test(t)) return 'Одежда и обувь';
   if (/парфум|духи|космет|крем|шампун|помад|туш|makeup/.test(t)) return 'Красота';

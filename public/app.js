@@ -46,6 +46,11 @@ const els = {
 
 function money(v){ return new Intl.NumberFormat('uk-UA',{maximumFractionDigits:0}).format(Number(v||0))+' ₴'; }
 function esc(v=''){ return String(v).replace(/[&<>'"]/g,c=>({ '&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#039;','"':'&quot;' }[c])); }
+function validImageUrl(v=''){
+  const s=String(v||'').trim();
+  if(!s || /\[object(?:%20|\s)+Object\]/i.test(s)) return '';
+  try { const u=new URL(s); return ['http:','https:'].includes(u.protocol) ? u.href : ''; } catch { return ''; }
+}
 function clamp(n,a,b){ return Math.min(b,Math.max(a,n)); }
 function progress(item){ return item.price > 0 ? clamp((Number(item.saved||0)/Number(item.price))*100,0,100) : 0; }
 function activeItems(){ return state.items.filter(x=>x.status!=='bought'); }
@@ -131,7 +136,7 @@ function sorted(items, mode){
   return copy.sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
 }
 function itemRow(item){
-  const pct=progress(item), img=item.image ? `<img class="product-thumb" src="${esc(item.image)}" alt="" onerror="this.outerHTML='<div class=&quot;thumb-placeholder&quot;>🛍</div>'">` : `<div class="thumb-placeholder">🛍</div>`;
+  const pct=progress(item), safeImage=validImageUrl(item.image), img=safeImage ? `<img class="product-thumb" src="${esc(safeImage)}" alt="" onerror="this.outerHTML='<div class=&quot;thumb-placeholder&quot;>🛍</div>'">` : `<div class="thumb-placeholder">🛍</div>`;
   return `<article class="purchase-row" data-id="${item.id}">
     ${img}
     <div class="product-main"><div class="product-title">${esc(item.title)}</div><div class="product-meta">${storeBadge(item)}<span class="category-pill">${esc(item.category)}</span></div></div>
@@ -187,16 +192,16 @@ function resetEditor(){
 }
 function openEditor(id=null){
   resetEditor();
-  if(id){ const x=state.items.find(v=>v.id===id); if(!x)return; els.itemId.value=x.id;els.urlInput.value=x.url||'';els.titleInput.value=x.title||'';els.priceInput.value=x.price||'';els.savedInput.value=x.saved||'';els.categoryInput.value=x.category||'Другое';els.priorityInput.value=String(x.priority||2);els.statusInput.value=x.status||'want';els.storeInput.value=x.store||'';els.imageInput.value=x.image||'';els.noteInput.value=x.note||'';els.deleteItem.classList.remove('hidden');els.editorTitle.textContent='Редактировать желание'; }
+  if(id){ const x=state.items.find(v=>v.id===id); if(!x)return; els.itemId.value=x.id;els.urlInput.value=x.url||'';els.titleInput.value=x.title||'';els.priceInput.value=x.price||'';els.savedInput.value=x.saved||'';els.categoryInput.value=x.category||'Другое';els.priorityInput.value=String(x.priority||2);els.statusInput.value=x.status||'want';els.storeInput.value=x.store||'';els.imageInput.value=validImageUrl(x.image||'');els.noteInput.value=x.note||'';els.deleteItem.classList.remove('hidden');els.editorTitle.textContent='Редактировать желание'; }
   updatePreview(); els.editor.showModal();
 }
 function updatePreview(){
-  const title=els.titleInput.value.trim()||'Новое желание',price=Number(els.priceInput.value||0),saved=Number(els.savedInput.value||0),pct=price?clamp(saved/price*100,0,100):0,img=els.imageInput.value.trim(),store=els.storeInput.value.trim()||'Магазин';
+  const title=els.titleInput.value.trim()||'Новое желание',price=Number(els.priceInput.value||0),saved=Number(els.savedInput.value||0),pct=price?clamp(saved/price*100,0,100):0,img=validImageUrl(els.imageInput.value),store=els.storeInput.value.trim()||'Магазин';
   els.previewTitle.textContent=title;els.previewStoreBadge.textContent=store;els.previewPrice.textContent=money(price);els.previewSaved.textContent=money(saved);els.previewProgressBar.style.width=`${pct}%`;els.previewProgressText.textContent=`${Math.round(pct)}%`;
   if(img){els.previewImage.src=img;els.previewImage.style.display='block';els.previewPlaceholder.style.display='none';els.previewImage.onerror=()=>{els.previewImage.style.display='none';els.previewPlaceholder.style.display='block'}}else{els.previewImage.style.display='none';els.previewPlaceholder.style.display='block'}
 }
 function itemPayload(){
-  const url=els.urlInput.value.trim(); return {title:els.titleInput.value.trim(),url,image:els.imageInput.value.trim(),store:els.storeInput.value.trim(),storeDomain:getDomain(url),price:Number(els.priceInput.value||0),saved:Number(els.savedInput.value||0),category:els.categoryInput.value,priority:Number(els.priorityInput.value),status:els.statusInput.value,note:els.noteInput.value.trim()};
+  const url=els.urlInput.value.trim(); return {title:els.titleInput.value.trim(),url,image:validImageUrl(els.imageInput.value),store:els.storeInput.value.trim(),storeDomain:getDomain(url),price:Number(els.priceInput.value||0),saved:Number(els.savedInput.value||0),category:els.categoryInput.value,priority:Number(els.priorityInput.value),status:els.statusInput.value,note:els.noteInput.value.trim()};
 }
 
 els.loginForm.addEventListener('submit',async e=>{e.preventDefault();els.loginMessage.textContent='Проверяю…';try{await api('/api/login',{method:'POST',body:JSON.stringify({password:els.passwordInput.value})});els.passwordInput.value='';els.loginMessage.textContent='';showApp();await loadItems()}catch(err){els.loginMessage.textContent=err.message}});
@@ -226,7 +231,7 @@ els.fetchPreview.onclick=async()=>{
     if(d.title) els.titleInput.value=d.title;
     if(d.price) els.priceInput.value=d.price;
     if(d.store) els.storeInput.value=d.store;
-    if(d.image) els.imageInput.value=d.image;
+    if(d.image) els.imageInput.value=validImageUrl(d.image);
     if(d.category) els.categoryInput.value=d.category;
     if(d.canonicalUrl) els.urlInput.value=d.canonicalUrl;
     els.fetchMessage.textContent=d.message || (d.quality==='partial'?'Получены не все данные — проверь поля.':d.quality==='none'?'Не удалось получить данные автоматически. Заполни поля вручную.':'Готово. Проверь данные перед сохранением.');
