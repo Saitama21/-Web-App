@@ -7,7 +7,7 @@ import * as cheerio from 'cheerio';
 const { Pool } = pg;
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
-const VERSION = '1.1.6';
+const VERSION = '1.1.7';
 const DATABASE_URL = String(process.env.DATABASE_URL || '');
 const LEGACY_APP_PASSWORD = String(process.env.APP_PASSWORD || '');
 const ADMIN_EMAIL = normalizeEmail(process.env.ADMIN_EMAIL || 'admin@hochu.local');
@@ -623,27 +623,108 @@ function makeupImageScore(candidate={}, title='', productId='') {
   if(!url) return -999;
   const identity=`${url} ${candidate.alt||''}`.toLowerCase();
   const hay=`${identity} ${candidate.context||''}`.toLowerCase();
-  if(/(?:banner|promo|action|sale|discount|reward|sprite|favicon|logo|icon|heart|gift|pixel|tracking|google)/i.test(identity)) return -100;
+  // Promotional strips on MAKEUP often use the same CDN and random filenames as product photos,
+  // so filtering the URL alone is not enough. Check nearby text/alt too.
+  if(/(?:banner|promo|action|sale|discount|reward|sprite|favicon|logo|icon|heart|gift|pixel|tracking|google|подар|акц(?:і|и)|зниж|скид|безкоштов|розіграш|розыгрыш|special\s+offer)/i.test(hay)) return -100;
   let score=0;
   if(/\.(?:jpe?g|webp|png)(?:[?#]|$)/i.test(url)) score+=3;
-  if(/makeup\.com\.ua/i.test(url)) score+=2;
+  if(/(?:^|\.)u\.makeup\.com\.ua|makeup\.com\.ua/i.test(url)) score+=2;
   if(productId && hay.includes(productId)) score+=7;
   const words=cleanText(title).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(x=>x.length>3).slice(0,8);
   const matches=words.filter(w=>hay.includes(w)).length;
-  score+=Math.min(10,matches*2);
+  score+=Math.min(12,matches*3);
   const w=Number(candidate.width||0), h=Number(candidate.height||0);
-  if(w>=300||h>=300) score+=3;
-  if(candidate.nearProduct) score+=4;
+  if(w>0&&h>0){
+    const ratio=w/h;
+    if(ratio>2.25||ratio<0.30) return -90; // obvious horizontal/vertical ad strip
+    if(w>=300&&h>=300) score+=5;
+  } else if(w>=300||h>=300) score+=2;
+  const distance=Number(candidate.distanceToTitle);
+  if(Number.isFinite(distance)) {
+    if(distance<=1400) score+=8;
+    else if(distance<=3500) score+=5;
+    else if(distance<=7000) score+=2;
+    else if(distance>12000) score-=6;
+  }
+  if(candidate.nearProduct) score+=5;
+  if(candidate.fromGallery) score+=9;
   return score;
 }
-function chooseMakeupImage(candidates=[], title='', pageUrl='') {
-  const productId=extractMakeupProductId(pageUrl); let best='', bestScore=-999;
+function rankMakeupImages(candidates=[], title='', pageUrl='') {
+  const productId=extractMakeupProductId(pageUrl); const seen=new Set(); const ranked=[];
   for(const c of candidates){
-    const url=normalizeImage(c.url||c.src||'',pageUrl); if(!url) continue;
+    const url=normalizeImage(c.url||c.src||'',pageUrl); if(!url||seen.has(url)) continue;
+    seen.add(url);
     const score=makeupImageScore({...c,url},title,productId);
-    if(score>bestScore){bestScore=score;best=url;}
+    if(score>=3) ranked.push({url,score});
   }
-  return bestScore>=3 ? best : '';
+  ranked.sort((a,b)=>b.score-a.score);
+  return ranked;
+}
+function chooseMakeupImage(candidates=[], title='', pageUrl='') {
+  return rankMakeupImages(candidates,title,pageUrl)[0]?.url || '';
+}
+function imageDimensionsFromBuffer(buf) {
+  try {
+    if(!Buffer.isBuffer(buf)||buf.length<24) return null;
+    // PNG
+    if(buf.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))) {
+      return {width:buf.readUInt32BE(16),height:buf.readUInt32BE(20)};
+    }
+    // GIF
+    if(buf.subarray(0,6).toString('ascii').match(/^GIF8[79]a$/)) {
+      return {width:buf.readUInt16LE(6),height:buf.readUInt16LE(8)};
+    }
+    // JPEG: scan for a Start Of Frame marker.
+    if(buf[0]===0xff&&buf[1]===0xd8) {
+      let pos=2;
+      const sof=new Set([0xc0,0xc1,0xc2,0xc3,0xc5,0xc6,0xc7,0xc9,0xca,0xcb,0xcd,0xce,0xcf]);
+      while(pos+9<buf.length) {
+        if(buf[pos]!==0xff){pos++;continue;}
+        while(pos<buf.length&&buf[pos]===0xff) pos++;
+        const marker=buf[pos++];
+        if(marker===0xd8||marker===0xd9||marker===0x01||(marker>=0xd0&&marker<=0xd7)) continue;
+        if(pos+2>buf.length) break;
+        const len=buf.readUInt16BE(pos); if(len<2||pos+len>buf.length) break;
+        if(sof.has(marker)&&pos+7<buf.length) return {height:buf.readUInt16BE(pos+3),width:buf.readUInt16BE(pos+5)};
+        pos+=len;
+      }
+    }
+    // WebP VP8X (common modern CDN output)
+    if(buf.subarray(0,4).toString('ascii')==='RIFF'&&buf.subarray(8,12).toString('ascii')==='WEBP') {
+      const kind=buf.subarray(12,16).toString('ascii');
+      if(kind==='VP8X'&&buf.length>=30) {
+        return {width:1+buf.readUIntLE(24,3),height:1+buf.readUIntLE(27,3)};
+      }
+    }
+  } catch {}
+  return null;
+}
+async function probeMakeupImage(url='') {
+  try {
+    const r=await fetch(url,{headers:{'user-agent':'Mozilla/5.0','accept':'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8','range':'bytes=0-262143','referer':'https://makeup.com.ua/'},signal:AbortSignal.timeout(6500)});
+    if(!r.ok&&r.status!==206) return null;
+    const buf=Buffer.from(await r.arrayBuffer());
+    return imageDimensionsFromBuffer(buf);
+  } catch { return null; }
+}
+async function resolveMakeupProductImage(result={}, pageUrl='') {
+  const candidates=[result.image,...(result.imageCandidates||[])].map(x=>normalizeImage(x,pageUrl)).filter(Boolean);
+  const unique=[...new Set(candidates)].slice(0,8);
+  if(!unique.length) return '';
+  const checked=await Promise.all(unique.map(async (url,index)=>({url,index,dims:await probeMakeupImage(url)})));
+  const valid=checked.filter(x=>{
+    if(!x.dims) return false;
+    const {width:w,height:h}=x.dims; if(!w||!h||w<180||h<180) return false;
+    const ratio=w/h;
+    return ratio>=0.30&&ratio<=2.25;
+  }).sort((a,b)=>a.index-b.index);
+  if(valid.length) return valid[0].url;
+  // If probing is blocked for some candidates, prefer an unknown candidate over one we have already
+  // proved to be a banner-shaped image.
+  const unknown=checked.filter(x=>!x.dims).sort((a,b)=>a.index-b.index);
+  if(unknown.length) return unknown[0].url;
+  return '';
 }
 function parseMakeupText(text='', pageUrl='', fallbackTitle='') {
   const s=String(text||''); const productId=extractMakeupProductId(pageUrl);
@@ -670,30 +751,51 @@ function parseMakeupHtml(html, pageUrl) {
   const text=$('body').text(); const textData=parseMakeupText(text,pageUrl,title);
   const candidates=[];
   $('img').each((_,el)=>{
-    const node=$(el); const parent=(node.closest('main,.product,.product-item,.product-card,.product-page,.product-slider,.gallery').attr('class')||'');
-    candidates.push({url:first(node.attr('src'),node.attr('data-src'),node.attr('data-original'),node.attr('content')),alt:node.attr('alt')||'',context:parent,width:node.attr('width'),height:node.attr('height'),nearProduct:Boolean(parent)});
+    const node=$(el);
+    const gallery=node.closest('[class*="gallery"],[class*="slider"],[class*="carousel"],[class*="product-image"],[class*="product__image"],[class*="product-photo"],[class*="product__photo"]');
+    const product=node.closest('.product,.product-item,.product-card,.product-page,[class*="product__"]');
+    const local=gallery.length?gallery:(product.length?product:node.parent());
+    const context=`${local.attr('class')||''} ${cleanText(local.text()).slice(0,500)}`;
+    candidates.push({
+      url:first(node.attr('src'),node.attr('data-src'),node.attr('data-original'),node.attr('data-lazy'),node.attr('content')),
+      alt:node.attr('alt')||'',context,width:node.attr('width'),height:node.attr('height'),
+      nearProduct:Boolean(product.length||gallery.length),fromGallery:Boolean(gallery.length)
+    });
   });
   const ogImage=$('meta[property="og:image"]').attr('content');
   if(ogImage) candidates.push({url:ogImage,alt:title,context:'og image',nearProduct:false});
-  const p=findProductJsonLd($);
-  if(p?.image) candidates.push({url:p.image,alt:p.name||title,context:'jsonld product',nearProduct:true});
-  const image=chooseMakeupImage(candidates,title,pageUrl);
-  return {...textData,title:title||textData.title,image,canonicalUrl:first($('link[rel="canonical"]').attr('href'),pageUrl),source:['makeup-html',...(textData.source||[])]};
+  const productJson=findProductJsonLd($);
+  if(productJson?.image) {
+    const arr=Array.isArray(productJson.image)?productJson.image:[productJson.image];
+    for(const im of arr) candidates.push({url:typeof im==='string'?im:(im?.url||im?.contentUrl),alt:productJson.name||title,context:'jsonld product image',nearProduct:true,fromGallery:true});
+  }
+  const ranked=rankMakeupImages(candidates,title,pageUrl); const image=ranked[0]?.url||'';
+  return {...textData,title:title||textData.title,image,imageCandidates:ranked.map(x=>x.url).slice(0,12),canonicalUrl:first($('link[rel="canonical"]').attr('href'),pageUrl),source:['makeup-html',...(textData.source||[])]};
 }
 function parseMakeupReaderMarkdown(text, pageUrl) {
   const s=String(text||''); const textData=parseMakeupText(s,pageUrl,''); const candidates=[];
   const rx=/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)(?:\s+"[^"]*")?\)/g; let m;
   const volumesIndex=s.search(/(?:\+\s*)?(?:(?:усі|всі)\s+об['’ʼ]?єми|все\s+объ[её]мы)/i);
-  const anchor=Math.max(0,volumesIndex>=0?volumesIndex:s.search(/код\s+товар/i));
-  while((m=rx.exec(s))){ candidates.push({url:m[2],alt:m[1],context:s.slice(Math.max(0,m.index-180),Math.min(s.length,m.index+260)),nearProduct:anchor>0&&Math.abs(m.index-anchor)<12000}); }
-  const image=chooseMakeupImage(candidates,textData.title,pageUrl);
-  return {...textData,image,source:['makeup-reader',...(textData.source||[])]};
+  const codeIndex=s.search(/код\s+товар/i);
+  const titleIndex=textData.title?s.toLowerCase().indexOf(textData.title.toLowerCase()):-1;
+  const anchor=titleIndex>=0?titleIndex:(volumesIndex>=0?volumesIndex:codeIndex);
+  while((m=rx.exec(s))){
+    const distance=anchor>=0?Math.abs(m.index-anchor):Number.NaN;
+    candidates.push({url:m[2],alt:m[1],context:s.slice(Math.max(0,m.index-220),Math.min(s.length,m.index+320)),nearProduct:Number.isFinite(distance)&&distance<6500,distanceToTitle:distance,fromGallery:Number.isFinite(distance)&&distance<2200});
+  }
+  const ranked=rankMakeupImages(candidates,textData.title,pageUrl); const image=ranked[0]?.url||'';
+  return {...textData,image,imageCandidates:ranked.map(x=>x.url).slice(0,12),source:['makeup-reader',...(textData.source||[])]};
 }
 function trustedMerge(base={}, next={}) {
+  const imageCandidates=[...new Set([
+    ...(next.imageCandidates||[]), next.image,
+    ...(base.imageCandidates||[]), base.image
+  ].filter(Boolean))];
   return {
     ...base,
     title: usableTitle(next.title) || usableTitle(base.title),
     image: next.image || base.image || '',
+    imageCandidates,
     price: numericPrice(next.price) || numericPrice(base.price),
     variant: cleanText(next.variant) || cleanText(base.variant) || '',
     canonicalUrl: next.canonicalUrl || base.canonicalUrl || '',
@@ -821,7 +923,7 @@ function parseMakeupSearchHtml(html='', searchUrl='', productUrl='', fallbackTit
       const imgNode=node.find('img').first();
       const image=normalizeImage(first(imgNode.attr('src'),imgNode.attr('data-src'),imgNode.attr('data-original')),searchUrl);
       const score=(current?5:0)+(title?3:0)+(image?2:0)+(text.toLowerCase().includes(cleanText(fallbackTitle).toLowerCase())?3:0);
-      if(score>bestScore){bestScore=score;best={title,price:current,image,canonicalUrl:productUrl,source:['makeup-search-html']};}
+      if(score>bestScore){bestScore=score;best={title,price:current,image,imageCandidates:image?[image]:[],canonicalUrl:productUrl,source:['makeup-search-html']};}
     }
   });
   return bestScore>0?best:{};
@@ -842,9 +944,12 @@ function parseMakeupSearchText(text='', productUrl='', fallbackTitle='') {
     price=pickCurrentPriceFromNearby(after.length?after:before,idx);
   }
   const imageMatches=[]; const rx=/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)(?:\s+"[^"]*")?\)/g; let m;
-  while((m=rx.exec(window))) imageMatches.push({url:m[2],alt:m[1],context:window.slice(Math.max(0,m.index-120),Math.min(window.length,m.index+220)),nearProduct:true});
-  const image=chooseMakeupImage(imageMatches,fallbackTitle,productUrl);
-  return {title:usableTitle(fallbackTitle),price,image,canonicalUrl:productUrl,source:['makeup-search-reader']};
+  while((m=rx.exec(window))) {
+    const absolute=start+m.index; const distance=Math.abs(absolute-idx);
+    imageMatches.push({url:m[2],alt:m[1],context:window.slice(Math.max(0,m.index-160),Math.min(window.length,m.index+260)),nearProduct:distance<2600,distanceToTitle:distance,fromGallery:distance<1200});
+  }
+  const ranked=rankMakeupImages(imageMatches,fallbackTitle,productUrl); const image=ranked[0]?.url||'';
+  return {title:usableTitle(fallbackTitle),price,image,imageCandidates:ranked.map(x=>x.url).slice(0,10),canonicalUrl:productUrl,source:['makeup-search-reader']};
 }
 async function makeupSearchFallback(productUrl='', title='') {
   const id=extractMakeupProductId(productUrl); if(!id) return {};
@@ -963,6 +1068,10 @@ app.post('/api/product-preview', requireAuth, async (req, res) => {
   } else {
     if (qualityOf(result) !== 'complete') result = mergeProduct(result, await readerFallback(url,info.domain));
     if (qualityOf(result) !== 'complete') result = mergeProduct(result, await microlinkFallback(url));
+  }
+
+  if (info.domain === 'makeup.com.ua') {
+    result.image = await resolveMakeupProductImage(result, url);
   }
 
   const quality = qualityOf(result);
