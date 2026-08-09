@@ -7,7 +7,7 @@ import * as cheerio from 'cheerio';
 const { Pool } = pg;
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
-const VERSION = '1.1.9';
+const VERSION = '1.1.10';
 const DATABASE_URL = String(process.env.DATABASE_URL || '');
 const LEGACY_APP_PASSWORD = String(process.env.APP_PASSWORD || '');
 const ADMIN_EMAIL = normalizeEmail(process.env.ADMIN_EMAIL || 'admin@hochu.local');

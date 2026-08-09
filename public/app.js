@@ -43,6 +43,7 @@ const els = {
   categoryGrid:$('categoryGrid'), storesGrid:$('storesGrid'), storeCountBadge:$('storeCountBadge'),
   aTotal:$('aTotal'), aSaved:$('aSaved'), aLeft:$('aLeft'), aBought:$('aBought'), aTotalBar:$('aTotalBar'), aSavedBar:$('aSavedBar'), aLeftBar:$('aLeftBar'), aBoughtBar:$('aBoughtBar'), categoryProgress:$('categoryProgress'),
   profileName:$('profileName'), profileAvatar:$('profileAvatar'), profileRole:$('profileRole'), nameSetting:$('nameSetting'), accountSetting:$('accountSetting'), saveName:$('saveName'), logoutButton:$('logoutButton'), mobileAdd:$('mobileAdd'),
+  openInstallGuide:$('openInstallGuide'), installGuideDialog:$('installGuideDialog'), installGuideClose:$('installGuideClose'), installGuideDone:$('installGuideDone'), installStatus:$('installStatus'), installNow:$('installNow'),
   editor:$('editorDialog'), editorForm:$('editorForm'), editorTitle:$('editorTitle'), editorClose:$('editorClose'), cancelEditor:$('cancelEditor'), deleteItem:$('deleteItem'),
   itemId:$('itemId'), urlInput:$('urlInput'), fetchPreview:$('fetchPreview'), fetchMessage:$('fetchMessage'), titleInput:$('titleInput'), priceInput:$('priceInput'), savedInput:$('savedInput'), categoryInput:$('categoryInput'), priorityInput:$('priorityInput'), statusInput:$('statusInput'), storeInput:$('storeInput'), variantInput:$('variantInput'), imageInput:$('imageInput'), noteInput:$('noteInput'),
   previewImageWrap:$('previewImageWrap'), previewImage:$('previewImage'), previewPlaceholder:$('previewPlaceholder'), previewTitle:$('previewTitle'), previewStoreBadge:$('previewStoreBadge'), previewPrice:$('previewPrice'), previewSaved:$('previewSaved'), previewProgressBar:$('previewProgressBar'), previewProgressText:$('previewProgressText'),
@@ -87,6 +88,58 @@ async function api(url, options={}){
 }
 function showLogin(){ els.appShell.classList.add('hidden'); els.loginView.classList.remove('hidden'); }
 function showApp(){ els.loginView.classList.add('hidden'); els.appShell.classList.remove('hidden'); }
+
+let deferredInstallPrompt = null;
+function isStandaloneApp(){
+  return matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+}
+function installPlatform(){
+  const ua=navigator.userAgent||'';
+  const ipadDesktop=navigator.platform==='MacIntel' && navigator.maxTouchPoints>1;
+  if(/android/i.test(ua)) return 'android';
+  if(/iPhone|iPad|iPod/i.test(ua) || ipadDesktop) return 'ios';
+  return 'other';
+}
+function isIOSSafari(){
+  const ua=navigator.userAgent||'';
+  return installPlatform()==='ios' && /Safari/i.test(ua) && !/CriOS|FxiOS|EdgiOS|OPiOS/i.test(ua);
+}
+function selectInstallTab(name){
+  const tab=name==='android'?'android':'ios';
+  $$('[data-install-tab]').forEach(b=>{const on=b.dataset.installTab===tab;b.classList.toggle('active',on);b.setAttribute('aria-selected',String(on));});
+  $$('[data-install-panel]').forEach(p=>p.classList.toggle('active',p.dataset.installPanel===tab));
+}
+function updateInstallGuideStatus(){
+  if(!els.installStatus || !els.installNow) return;
+  const platform=installPlatform();
+  els.installNow.classList.add('hidden');
+  if(isStandaloneApp()){
+    els.installStatus.innerHTML='<b>«Хочу» уже установлено ✓</b><span>Ты открыл приложение с иконки на главном экране.</span>';
+    return;
+  }
+  if(platform==='ios'){
+    els.installStatus.innerHTML=isIOSSafari()
+      ? '<b>iPhone / iPad определён</b><span>Safari → Поделиться ↥ → «На экран Домой».</span>'
+      : '<b>На iPhone открой эту ссылку в Safari</b><span>Chrome и другие браузеры не всегда показывают системный пункт «На экран Домой».</span>';
+    return;
+  }
+  if(platform==='android'){
+    if(deferredInstallPrompt){
+      els.installStatus.innerHTML='<b>Android готов к установке ✓</b><span>Можно нажать «Установить сейчас» или воспользоваться меню Chrome.</span>';
+      els.installNow.classList.remove('hidden');
+    }else{
+      els.installStatus.innerHTML='<b>Android определён</b><span>Chrome → ⋮ → «Установить приложение» или «Добавить на главный экран».</span>';
+    }
+    return;
+  }
+  els.installStatus.innerHTML='<b>Открой этот раздел на телефоне</b><span>Инструкция ниже подходит для iPhone/iPad и Android.</span>';
+}
+function openInstallHelp(){
+  const platform=installPlatform();
+  selectInstallTab(platform==='android'?'android':'ios');
+  updateInstallGuideStatus();
+  els.installGuideDialog.showModal();
+}
 
 function applyTheme(theme){
   state.theme = theme;
@@ -305,6 +358,15 @@ $$('[data-action="add"]').forEach(b=>b.onclick=()=>openEditor());
 $$('.nav-item,.mobile-nav-item').forEach(b=>b.onclick=()=>setView(b.dataset.view));
 $$('.theme-card').forEach(b=>b.onclick=()=>applyTheme(b.dataset.themeChoice));
 els.saveName.onclick=async()=>{try{const d=await api('/api/profile',{method:'PATCH',body:JSON.stringify({name:els.nameSetting.value.trim()})});state.me=d.user;updateProfile()}catch(err){alert(err.message)}};
+els.openInstallGuide.onclick=openInstallHelp;
+els.installGuideClose.onclick=els.installGuideDone.onclick=()=>els.installGuideDialog.close();
+$$('[data-install-tab]').forEach(b=>b.onclick=()=>selectInstallTab(b.dataset.installTab));
+els.installNow.onclick=async()=>{
+  if(!deferredInstallPrompt){updateInstallGuideStatus();return;}
+  const promptEvent=deferredInstallPrompt;deferredInstallPrompt=null;
+  try{await promptEvent.prompt();await promptEvent.userChoice;}catch{}
+  updateInstallGuideStatus();
+};
 els.logoutButton.onclick=async()=>{await fetch('/api/logout',{method:'POST'});state.me=null;showLogin()};
 els.adminUserSearch?.addEventListener('input',renderAdminUsers);els.openAdminSettings.onclick=()=>setView('admin');
 els.createInviteBtn.onclick=()=>{els.inviteForm.reset();els.inviteDays.value='7';els.inviteUses.value='1';els.inviteResult.classList.add('hidden');els.inviteMessage.textContent='';els.inviteDialog.showModal()};
@@ -345,10 +407,12 @@ els.editorForm.addEventListener('submit',async e=>{e.preventDefault();const payl
 els.deleteItem.onclick=async()=>{if(!els.itemId.value||!confirm('Удалить эту покупку из журнала?'))return;try{await api(`/api/items/${els.itemId.value}`,{method:'DELETE'});els.editor.close();await loadItems()}catch(err){alert(err.message)}};
 
 window.addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();els.homeSearch.focus()}if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='n'){e.preventDefault();openEditor()}});
+window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredInstallPrompt=e;updateInstallGuideStatus();});
+window.addEventListener('appinstalled',()=>{deferredInstallPrompt=null;updateInstallGuideStatus();});
 if('serviceWorker' in navigator){
   window.addEventListener('load',async()=>{
     try{
-      const reg=await navigator.serviceWorker.register('/sw.js?v=1.1.9',{updateViaCache:'none'});
+      const reg=await navigator.serviceWorker.register('/sw.js?v=1.1.10',{updateViaCache:'none'});
       await reg.update();
     }catch{}
   });
