@@ -1,3 +1,7 @@
+# Хочу v1.1.3 — Mobile Admin UI Fix
+
+Исправлены все админские модальные окна на мобильных устройствах и iPhone Safari.
+
 # Хочу v1.1.2 — Auth/Cache Fix
 
 См. `UPDATE_v1.1.2.txt` для исправления входа администратора и старого Service Worker cache.
