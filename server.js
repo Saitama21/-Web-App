@@ -7,7 +7,7 @@ import * as cheerio from 'cheerio';
 const { Pool } = pg;
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
-const VERSION = '1.1.0';
+const VERSION = '1.1.2';
 const DATABASE_URL = String(process.env.DATABASE_URL || '');
 const LEGACY_APP_PASSWORD = String(process.env.APP_PASSWORD || '');
 const ADMIN_EMAIL = normalizeEmail(process.env.ADMIN_EMAIL || 'admin@hochu.local');
@@ -20,8 +20,20 @@ const RESET_TTL_MS = 1000 * 60 * 30;
 
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: false, limit: '1mb' }));
 app.use(cookieParser());
-app.use(express.static('public', { extensions: ['html'], maxAge: process.env.NODE_ENV === 'production' ? '1h' : 0 }));
+app.use(express.static('public', {
+  extensions: ['html'],
+  maxAge: 0,
+  etag: false,
+  setHeaders(res, filePath) {
+    if (/\.(?:html|css|js|webmanifest)$/i.test(filePath)) {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+    }
+  }
+}));
 
 const pool = DATABASE_URL ? new Pool({
   connectionString: DATABASE_URL,
@@ -200,7 +212,28 @@ async function initDb() {
 
 async function ensureDbAdmin() {
   let q = await pool.query(`SELECT * FROM users WHERE role='admin' ORDER BY created_at LIMIT 1`);
-  if (q.rowCount) return q.rows[0];
+  if (q.rowCount) {
+    // Railway ADMIN_* values are the source of truth for the owner account.
+    // This also repairs an admin that was created by an older migration with legacy credentials.
+    let admin = q.rows[0];
+    const desiredUsername = ADMIN_USERNAME || admin.username;
+    const desiredEmail = ADMIN_EMAIL || admin.email;
+    const desiredName = ADMIN_NAME || admin.name;
+    let desiredHash = admin.password_hash;
+    if (ADMIN_PASSWORD && !(await verifyPassword(ADMIN_PASSWORD, admin.password_hash))) {
+      desiredHash = await hashPassword(ADMIN_PASSWORD);
+    }
+    try {
+      const updated = await pool.query(`
+        UPDATE users SET name=$2, username=$3, email=$4, password_hash=$5, role='admin', status='active'
+        WHERE id=$1 RETURNING *
+      `,[admin.id,desiredName,desiredUsername,desiredEmail,desiredHash]);
+      return updated.rows[0];
+    } catch (err) {
+      console.error('ADMIN_* sync failed (possible username/email conflict):', err.message);
+      return admin;
+    }
+  }
   if (!ADMIN_PASSWORD) return null;
   const hash = await hashPassword(ADMIN_PASSWORD);
   const id=crypto.randomUUID();

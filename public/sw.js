@@ -1,8 +1,17 @@
-const CACHE='hochu-shell-v1.1.1';
-const ASSETS=['/','/styles.css','/app.js','/manifest.webmanifest','/assets/icons/icon-192.png','/assets/icons/icon-512.png'];
-self.addEventListener('install',e=>e.waitUntil(caches.open(CACHE).then(c=>c.addAll(ASSETS)).then(()=>self.skipWaiting())));
-self.addEventListener('activate',e=>e.waitUntil(Promise.all([caches.keys().then(keys=>Promise.all(keys.filter(k=>k!==CACHE).map(k=>caches.delete(k)))),self.clients.claim()])));
-self.addEventListener('fetch',e=>{
-  if(e.request.method!=='GET'||e.request.url.includes('/api/'))return;
-  e.respondWith(fetch(e.request).then(r=>{const copy=r.clone();caches.open(CACHE).then(c=>c.put(e.request,copy));return r}).catch(()=>caches.match(e.request)));
+const CACHE='hochu-static-v1.1.2';
+const STATIC=['/assets/icons/icon-192.png','/assets/icons/icon-512.png','/assets/icons/apple-touch-icon.png'];
+self.addEventListener('install',event=>event.waitUntil(caches.open(CACHE).then(c=>c.addAll(STATIC)).then(()=>self.skipWaiting())));
+self.addEventListener('activate',event=>event.waitUntil(Promise.all([
+  caches.keys().then(keys=>Promise.all(keys.filter(k=>k!==CACHE).map(k=>caches.delete(k)))),
+  self.clients.claim()
+])));
+self.addEventListener('fetch',event=>{
+  const req=event.request;
+  const url=new URL(req.url);
+  if(req.method!=='GET' || url.origin!==self.location.origin) return;
+  // Always go to Railway for app shell/code/data so deployments cannot mix versions.
+  if(url.pathname==='/' || url.pathname.endsWith('.html') || url.pathname.endsWith('.js') || url.pathname.endsWith('.css') || url.pathname.startsWith('/api/')) return;
+  if(url.pathname.startsWith('/assets/icons/')){
+    event.respondWith(caches.match(req).then(hit=>hit||fetch(req).then(res=>{const copy=res.clone();caches.open(CACHE).then(c=>c.put(req,copy));return res;})));
+  }
 });

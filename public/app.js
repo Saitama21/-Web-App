@@ -279,7 +279,19 @@ async function copyText(value,button){
   try{await navigator.clipboard.writeText(value);const old=button.textContent;button.textContent='Скопировано ✓';setTimeout(()=>button.textContent=old,1600);}catch{prompt('Скопируй ссылку:',value)}
 }
 
-els.loginForm.addEventListener('submit',async e=>{e.preventDefault();els.loginMessage.textContent='Проверяю…';try{const d=await api('/api/login',{method:'POST',body:JSON.stringify({login:els.loginInput.value,password:els.passwordInput.value})});state.me=d.user;els.passwordInput.value='';els.loginMessage.textContent='';updateProfile();showApp();await loadItems();if(state.me?.role==='admin')await refreshAdminBadge()}catch(err){els.loginMessage.textContent=err.message}});
+els.loginForm.addEventListener('submit',async e=>{
+  e.preventDefault();
+  const form = new FormData(e.currentTarget);
+  const login = String(form.get('login') ?? els.loginInput.value ?? '').trim();
+  const password = String(form.get('password') ?? els.passwordInput.value ?? '');
+  if(!login || !password){ els.loginMessage.textContent='Укажи логин/email и пароль.'; return; }
+  els.loginMessage.textContent='Проверяю…';
+  try{
+    const d=await api('/api/login',{method:'POST',credentials:'same-origin',body:JSON.stringify({login,password})});
+    state.me=d.user; els.passwordInput.value=''; els.loginMessage.textContent=''; updateProfile(); showApp(); await loadItems();
+    if(state.me?.role==='admin') await refreshAdminBadge();
+  }catch(err){ els.loginMessage.textContent=err.message; }
+});
 els.togglePassword.onclick=()=>{els.passwordInput.type=els.passwordInput.type==='password'?'text':'password'};
 els.requestAccessBtn.onclick=openAccessDialog;els.inviteRequestBtn.onclick=openAccessDialog;els.forgotPasswordBtn.onclick=()=>{els.forgotForm.reset();els.forgotMessage.textContent='';els.forgotDialog.showModal()};
 els.accessClose.onclick=els.accessCancel.onclick=()=>els.accessDialog.close();
@@ -332,5 +344,12 @@ els.editorForm.addEventListener('submit',async e=>{e.preventDefault();const payl
 els.deleteItem.onclick=async()=>{if(!els.itemId.value||!confirm('Удалить эту покупку из журнала?'))return;try{await api(`/api/items/${els.itemId.value}`,{method:'DELETE'});els.editor.close();await loadItems()}catch(err){alert(err.message)}};
 
 window.addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();els.homeSearch.focus()}if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='n'){e.preventDefault();openEditor()}});
-if('serviceWorker' in navigator){window.addEventListener('load',()=>navigator.serviceWorker.register('/sw.js').catch(()=>{}))}
+if('serviceWorker' in navigator){
+  window.addEventListener('load',async()=>{
+    try{
+      const reg=await navigator.serviceWorker.register('/sw.js?v=1.1.2',{updateViaCache:'none'});
+      await reg.update();
+    }catch{}
+  });
+}
 boot();
