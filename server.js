@@ -7,7 +7,7 @@ import * as cheerio from 'cheerio';
 const { Pool } = pg;
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
-const VERSION = '1.1.3';
+const VERSION = '1.1.4';
 const DATABASE_URL = String(process.env.DATABASE_URL || '');
 const LEGACY_APP_PASSWORD = String(process.env.APP_PASSWORD || '');
 const ADMIN_EMAIL = normalizeEmail(process.env.ADMIN_EMAIL || 'admin@hochu.local');
@@ -37,7 +37,7 @@ app.use(express.static('public', {
 
 const pool = DATABASE_URL ? new Pool({
   connectionString: DATABASE_URL,
-  ssl: /localhost|127\\.0\\.0\\.1/.test(DATABASE_URL) ? false : { rejectUnauthorized: false }
+  ssl: /localhost|127\.0\.0\.1/.test(DATABASE_URL) ? false : { rejectUnauthorized: false }
 }) : null;
 
 // In-memory fallback keeps local development/test mode working without PostgreSQL.
@@ -45,10 +45,10 @@ const mem = {
   users: [], sessions: new Map(), items: [], accessRequests: [], resetRequests: [], resetTokens: [], invitations: [], audit: []
 };
 
-function cleanShort(value='', max=120) { return String(value ?? '').replace(/\\s+/g, ' ').trim().slice(0,max); }
+function cleanShort(value='', max=120) { return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0,max); }
 function normalizeEmail(value='') { return String(value ?? '').trim().toLowerCase().slice(0,254); }
 function normalizeUsername(value='') { return String(value ?? '').trim().toLowerCase().replace(/\s+/g,'').slice(0,40); }
-function validEmail(value='') { return /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(normalizeEmail(value)); }
+function validEmail(value='') { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizeEmail(value)); }
 function validUsername(value='') { return /^[\p{L}\p{N}][\p{L}\p{N}._-]{2,39}$/u.test(normalizeUsername(value)); }
 function tokenHash(token='') { return crypto.createHash('sha256').update(String(token)).digest('hex'); }
 
@@ -304,7 +304,10 @@ app.get('/api/invite/validate', async (req,res)=>{
 });
 app.post('/api/access-request', rateLimit('access',5,10*60_000), async (req,res)=>{
   const name=cleanShort(req.body?.name,80),username=normalizeUsername(req.body?.username),email=normalizeEmail(req.body?.email),password=String(req.body?.password||''),message=cleanShort(req.body?.message,500),inviteToken=String(req.body?.inviteToken||'');
-  if(!name||!validUsername(username)||!validEmail(email)||password.length<8)return res.status(400).json({error:'Проверь имя, логин, email и пароль (минимум 8 символов).'});
+  if(!name)return res.status(400).json({error:'Укажи имя.'});
+  if(!validUsername(username))return res.status(400).json({error:'Логин: минимум 3 символа. Можно буквы, цифры, точку, дефис и подчёркивание.'});
+  if(!validEmail(email))return res.status(400).json({error:'Проверь email — адрес выглядит некорректно.'});
+  if(password.length<8)return res.status(400).json({error:'Пароль должен содержать минимум 8 символов.'});
   const inviteHash=tokenHash(inviteToken); let invite=null;
   if(pool){const iq=await pool.query(`SELECT * FROM invitations WHERE token_hash=$1 AND active=TRUE AND expires_at>NOW() AND uses<max_uses LIMIT 1`,[inviteHash]);invite=iq.rows[0];}
   else invite=mem.invitations.find(i=>i.tokenHash===inviteHash&&i.active&&i.expiresAt>Date.now()&&i.uses<i.maxUses);

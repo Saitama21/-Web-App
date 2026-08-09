@@ -1,4 +1,4 @@
-const CACHE='hochu-static-v1.1.3';
+const CACHE='hochu-static-v1.1.4';
 const STATIC=['/assets/icons/icon-192.png','/assets/icons/icon-512.png','/assets/icons/apple-touch-icon.png'];
 self.addEventListener('install',event=>event.waitUntil(caches.open(CACHE).then(c=>c.addAll(STATIC)).then(()=>self.skipWaiting())));
 self.addEventListener('activate',event=>event.waitUntil(Promise.all([
