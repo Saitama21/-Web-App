@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="ru" data-theme="system">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#f5f8f7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#101615" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Хочу">
+  <title>Хочу — журнал покупок</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/assets/icons/apple-touch-icon.png">
+  <link rel="icon" href="/assets/icons/favicon-64.png">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="ambient ambient-a"></div>
+  <div class="ambient ambient-b"></div>
+
+  <section id="loginView" class="auth-view">
+    <form id="loginForm" class="auth-card glass" autocomplete="on">
+      <img src="/assets/icons/icon-192.png" class="auth-icon" alt="Хочу">
+      <div class="kicker">ЛИЧНЫЙ ЖУРНАЛ ПОКУПОК</div>
+      <h1>Хочу</h1>
+      <p>Собирай желания, копи на покупки и не теряй ссылки.</p>
+      <label class="field-label">Пароль</label>
+      <div class="password-wrap">
+        <input id="passwordInput" type="password" placeholder="Введите пароль" autocomplete="current-password" required>
+        <button id="togglePassword" type="button" class="ghost-icon" aria-label="Показать пароль">◉</button>
+      </div>
+      <button class="primary wide" type="submit">Войти</button>
+      <small id="loginMessage" class="form-message"></small>
+    </form>
+  </section>
+
+  <div id="appShell" class="app-shell hidden">
+    <aside class="sidebar glass">
+      <div class="brand-block">
+        <img src="/assets/icons/icon-192.png" alt="" class="brand-icon">
+        <div><strong>Хочу</strong><span>твои покупки</span></div>
+      </div>
+
+      <nav id="sidebarNav" class="side-nav">
+        <button class="nav-item active" data-view="home"><span>⌂</span>Главная</button>
+        <button class="nav-item" data-view="purchases"><span>▣</span>Мои покупки</button>
+        <button class="nav-item" data-view="categories"><span>⌘</span>Категории</button>
+        <button class="nav-item" data-view="stores"><span>▤</span>Магазины</button>
+        <button class="nav-item" data-view="stats"><span>▥</span>Статистика</button>
+        <button class="nav-item" data-view="settings"><span>⚙</span>Настройки</button>
+      </nav>
+
+      <div class="profile-card glass-subtle">
+        <div class="avatar">И</div>
+        <div class="profile-meta"><b id="profileName">Иван</b><small>личный журнал</small></div>
+        <span class="online-dot"></span>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar glass">
+        <div class="top-title">
+          <h2 id="pageTitle">Мои покупки</h2>
+          <span id="pageSubtitle">Желания, на которые ты копишь</span>
+        </div>
+        <div class="top-actions">
+          <button id="themeQuick" class="icon-button" title="Сменить тему">◐</button>
+          <button id="addTopButton" class="primary add-button">＋ Добавить</button>
+        </div>
+      </header>
+
+      <section id="view-home" class="view active">
+        <div class="stats-grid">
+          <article class="stat-card glass"><div class="stat-icon mint">▣</div><div><span>Всего товаров</span><strong id="statCount">0</strong><small id="statActiveText">активных желаний</small></div></article>
+          <article class="stat-card glass"><div class="stat-icon cyan">◒</div><div><span>Накопил</span><strong id="statSaved">0 ₴</strong><small id="statSavedSub">из 0 ₴</small></div></article>
+          <article class="stat-card glass"><div class="stat-icon amber">◷</div><div><span>Заказал</span><strong id="statOrdered">0</strong><small>товара</small></div></article>
+          <article class="stat-card glass"><div class="stat-icon green">✓</div><div><span>Куплено</span><strong id="statBought">0</strong><small>товара</small></div></article>
+        </div>
+
+        <section class="content-panel glass">
+          <div class="panel-head">
+            <div>
+              <h3>Мои покупки</h3>
+              <p>Следи за прогрессом накопления</p>
+            </div>
+            <div class="panel-actions">
+              <div class="search-wrap"><span>⌕</span><input id="homeSearch" type="search" placeholder="Поиск по товарам…"></div>
+              <select id="homeSort" class="compact-select">
+                <option value="recent">Недавно добавленные</option>
+                <option value="priority">По приоритету</option>
+                <option value="priceAsc">Цена ↑</option>
+                <option value="priceDesc">Цена ↓</option>
+                <option value="progress">По прогрессу</option>
+              </select>
+            </div>
+          </div>
+          <div class="status-tabs" id="homeTabs">
+            <button class="tab active" data-status="all">Все</button>
+            <button class="tab" data-status="want">Хочу</button>
+            <button class="tab" data-status="plan">Планирую</button>
+            <button class="tab" data-status="ordered">Заказал</button>
+            <button class="tab" data-status="bought">Куплено</button>
+          </div>
+          <div id="homeList" class="purchase-list"></div>
+          <div id="homeEmpty" class="empty-state hidden">
+            <img src="/assets/icons/icon-192.png" alt="">
+            <h3>Пока здесь пусто</h3>
+            <p>Добавь первую ссылку на вещь, которую хочешь купить.</p>
+            <button class="primary" data-action="add">＋ Добавить желание</button>
+          </div>
+          <div class="total-strip">
+            <span>Общая сумма активных покупок</span>
+            <strong id="totalActive">0 ₴</strong>
+            <div class="overall-progress"><i id="overallBar"></i></div>
+            <small id="overallText">Накоплено 0%</small>
+          </div>
+        </section>
+      </section>
+
+      <section id="view-purchases" class="view">
+        <section class="content-panel glass full-height-panel">
+          <div class="panel-head">
+            <div><h3>Все покупки</h3><p>Полный журнал желаний и покупок</p></div>
+            <div class="panel-actions"><div class="search-wrap"><span>⌕</span><input id="allSearch" type="search" placeholder="Название, магазин, категория…"></div></div>
+          </div>
+          <div class="filter-row">
+            <select id="allStatus"><option value="all">Все статусы</option><option value="want">Хочу</option><option value="plan">Планирую</option><option value="ordered">Заказал</option><option value="bought">Куплено</option><option value="paused">Отложено</option></select>
+            <select id="allCategory"><option value="all">Все категории</option></select>
+            <select id="allStore"><option value="all">Все магазины</option></select>
+          </div>
+          <div id="allList" class="purchase-list large"></div>
+        </section>
+      </section>
+
+      <section id="view-categories" class="view">
+        <div id="categoryGrid" class="category-grid"></div>
+      </section>
+
+      <section id="view-stores" class="view">
+        <div class="hero-strip glass"><div><h3>Магазины</h3><p>Где лежат твои хотелки</p></div><span id="storeCountBadge" class="big-badge">0</span></div>
+        <div id="storesGrid" class="stores-grid"></div>
+      </section>
+
+      <section id="view-stats" class="view">
+        <div class="analytics-grid">
+          <article class="analytics-card glass"><span>Стоимость активных желаний</span><strong id="aTotal">0 ₴</strong><div class="mini-bar"><i id="aTotalBar"></i></div></article>
+          <article class="analytics-card glass"><span>Уже накоплено</span><strong id="aSaved">0 ₴</strong><div class="mini-bar"><i id="aSavedBar"></i></div></article>
+          <article class="analytics-card glass"><span>Осталось накопить</span><strong id="aLeft">0 ₴</strong><div class="mini-bar"><i id="aLeftBar"></i></div></article>
+          <article class="analytics-card glass"><span>Куплено товаров</span><strong id="aBought">0</strong><div class="mini-bar"><i id="aBoughtBar"></i></div></article>
+        </div>
+        <section class="content-panel glass"><div class="panel-head"><div><h3>Прогресс по категориям</h3><p>Сколько накоплено относительно стоимости</p></div></div><div id="categoryProgress" class="category-progress"></div></section>
+      </section>
+
+      <section id="view-settings" class="view">
+        <div class="settings-grid">
+          <section class="settings-card glass">
+            <h3>Оформление</h3><p>Светлая матовая и тёмная стеклянная темы.</p>
+            <div class="theme-choices">
+              <button class="theme-card" data-theme-choice="light"><span class="theme-preview light-preview"></span><b>Светлая</b><small>матовое стекло</small></button>
+              <button class="theme-card" data-theme-choice="dark"><span class="theme-preview dark-preview"></span><b>Тёмная</b><small>графитовое стекло</small></button>
+              <button class="theme-card" data-theme-choice="system"><span class="theme-preview system-preview"></span><b>Системная</b><small>как на устройстве</small></button>
+            </div>
+          </section>
+          <section class="settings-card glass"><h3>Профиль</h3><p>Имя отображается только в этом браузере.</p><label class="field-label">Имя</label><input id="nameSetting" value="Иван"><button id="saveName" class="secondary">Сохранить имя</button></section>
+          <section class="settings-card glass danger-zone"><h3>Сессия</h3><p>Выйти из журнала на этом устройстве.</p><button id="logoutButton" class="danger-button">Выйти</button></section>
+        </div>
+      </section>
+    </main>
+
+    <nav id="mobileNav" class="mobile-nav glass">
+      <button class="mobile-nav-item active" data-view="home"><span>⌂</span><small>Главная</small></button>
+      <button class="mobile-nav-item" data-view="categories"><span>⌘</span><small>Категории</small></button>
+      <button id="mobileAdd" class="mobile-add">＋</button>
+      <button class="mobile-nav-item" data-view="purchases"><span>✓</span><small>Куплено</small></button>
+      <button class="mobile-nav-item" data-view="settings"><span>○</span><small>Профиль</small></button>
+    </nav>
+  </div>
+
+  <dialog id="editorDialog">
+    <form id="editorForm" class="editor glass">
+      <div class="editor-head"><div><span class="kicker">КАРТОЧКА ПОКУПКИ</span><h2 id="editorTitle">Новое желание</h2></div><button id="editorClose" type="button" class="icon-button">×</button></div>
+      <input id="itemId" type="hidden">
+      <div class="editor-layout">
+        <aside class="product-preview glass-subtle">
+          <div id="previewImageWrap" class="preview-image"><img id="previewImage" alt=""><span id="previewPlaceholder">🛍</span></div>
+          <h3 id="previewTitle">Новое желание</h3>
+          <div id="previewStoreBadge" class="store-badge">Магазин</div>
+          <div class="preview-money"><span>Цена</span><strong id="previewPrice">0 ₴</strong></div>
+          <div class="preview-money"><span>Накопил</span><strong id="previewSaved">0 ₴</strong></div>
+          <div class="progress-track"><i id="previewProgressBar"></i></div><small id="previewProgressText">0%</small>
+        </aside>
+        <div class="editor-fields">
+          <label>Ссылка на товар<div class="url-row"><input id="urlInput" type="url" placeholder="https://…"><button id="fetchPreview" type="button" class="secondary">✦ Подтянуть</button></div><small id="fetchMessage" class="form-message"></small></label>
+          <label>Название<input id="titleInput" required placeholder="Например, BLUETTI Premium 30 V2"></label>
+          <div class="grid2"><label>Цена, ₴<input id="priceInput" type="number" min="0" step="0.01" inputmode="decimal"></label><label>Накопил, ₴<input id="savedInput" type="number" min="0" step="0.01" inputmode="decimal"></label></div>
+          <div class="grid2"><label>Категория<select id="categoryInput"><option>Техника</option><option>Аксессуары</option><option>Красота</option><option>Одежда и обувь</option><option>Дом</option><option>Инструменты</option><option>Путешествия</option><option>Подарки</option><option>Другое</option></select></label><label>Приоритет<select id="priorityInput"><option value="1">Низкий</option><option value="2">Средний</option><option value="3">Высокий</option><option value="4">Купить первым</option></select></label></div>
+          <div class="grid2"><label>Статус<select id="statusInput"><option value="want">Хочу</option><option value="plan">Планирую</option><option value="ordered">Заказал</option><option value="bought">Куплено</option><option value="paused">Отложено</option></select></label><label>Магазин<input id="storeInput" placeholder="Rozetka"></label></div>
+          <label>Изображение<input id="imageInput" type="url" placeholder="Ссылка на изображение (можно оставить пустым)"></label>
+          <label>Заметка<textarea id="noteInput" rows="4" placeholder="Почему хочешь купить, что проверить, какая комплектация нужна…"></textarea></label>
+        </div>
+      </div>
+      <div class="editor-actions"><button id="deleteItem" type="button" class="danger-button hidden">Удалить</button><span></span><button id="cancelEditor" type="button" class="secondary">Отмена</button><button class="primary" type="submit">Сохранить</button></div>
+    </form>
+  </dialog>
+
+  <script src="/app.js"></script>
+</body>
+</html>

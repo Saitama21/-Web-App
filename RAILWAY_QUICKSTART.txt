@@ -1,0 +1,15 @@
+ХОЧУ v1.0.0 — БЫСТРЫЙ ДЕПЛОЙ
+
+1) Распакуй архив.
+2) GitHub Desktop -> новый/локальный репозиторий -> Commit -> Push.
+3) Railway -> New Project -> Deploy from GitHub Repo.
+4) + New -> Database -> PostgreSQL.
+5) В Variables веб-сервиса:
+   APP_PASSWORD = твой пароль
+   SESSION_SECRET = длинная случайная строка
+   DATABASE_URL = reference на DATABASE_URL PostgreSQL
+6) Settings -> Networking -> Generate Domain.
+7) Проверка: https://твой-домен/api/health
+   Норма: database = postgresql
+
+Светлая/темная темы переключаются в приложении.
