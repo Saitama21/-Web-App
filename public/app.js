@@ -348,7 +348,7 @@ window.addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key.toLowerCa
 if('serviceWorker' in navigator){
   window.addEventListener('load',async()=>{
     try{
-      const reg=await navigator.serviceWorker.register('/sw.js?v=1.1.5',{updateViaCache:'none'});
+      const reg=await navigator.serviceWorker.register('/sw.js?v=1.1.6',{updateViaCache:'none'});
       await reg.update();
     }catch{}
   });

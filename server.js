@@ -7,7 +7,7 @@ import * as cheerio from 'cheerio';
 const { Pool } = pg;
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
-const VERSION = '1.1.5';
+const VERSION = '1.1.6';
 const DATABASE_URL = String(process.env.DATABASE_URL || '');
 const LEGACY_APP_PASSWORD = String(process.env.APP_PASSWORD || '');
 const ADMIN_EMAIL = normalizeEmail(process.env.ADMIN_EMAIL || 'admin@hochu.local');
@@ -569,18 +569,48 @@ function priceCandidates(text='') {
   while((m=rx.exec(s))){ const value=numericPrice(m[1]); if(value) out.push({value,index:m.index,raw:m[0]}); }
   return out;
 }
+function pickCurrentPriceFromNearby(candidates=[], anchor=0) {
+  if(!candidates.length) return null;
+  const sorted=[...candidates].sort((a,b)=>Math.abs(a.index-anchor)-Math.abs(b.index-anchor));
+  const nearest=sorted[0];
+  // MAKEUP usually prints the active price and an optional crossed-out old price almost together.
+  // If the nearest candidate has a sibling within ~140 chars, the lower value is the live price.
+  const sibling=candidates.find(x=>x!==nearest && Math.abs(x.index-nearest.index)<=140);
+  if(sibling) return Math.min(nearest.value,sibling.value);
+  return nearest.value;
+}
+function makeupPriceAroundAnchor(text='', anchor=-1, before=1800, after=900) {
+  if(anchor<0) return null;
+  const s=String(text||'');
+  const start=Math.max(0,anchor-before), end=Math.min(s.length,anchor+after);
+  const window=s.slice(start,end); const all=priceCandidates(window);
+  if(!all.length) return null;
+  const absolute=all.map(x=>({...x,index:x.index+start}));
+  return pickCurrentPriceFromNearby(absolute,anchor);
+}
 function makeupPriceBeforeAnchor(text='', anchor=-1) {
   if(anchor<0) return null;
-  const start=Math.max(0,anchor-1200), window=String(text).slice(start,anchor);
+  const start=Math.max(0,anchor-2200), window=String(text).slice(start,anchor);
   const all=priceCandidates(window); if(!all.length) return null;
-  const close=all.filter(x=>x.index>=Math.max(0,window.length-520));
-  const pool=(close.length?close:all.slice(-3)).slice(-3);
-  // MAKEUP renders the current discounted price next to an optional crossed-out old price.
-  // When those values are adjacent, the lower one is the actual current price.
-  if(pool.length>=2 && pool[pool.length-1].index-pool[pool.length-2].index<120) {
-    return Math.min(pool[pool.length-1].value,pool[pool.length-2].value);
+  const absolute=all.map(x=>({...x,index:x.index+start}));
+  const close=absolute.filter(x=>x.index>=Math.max(start,anchor-800));
+  return pickCurrentPriceFromNearby(close.length?close:absolute.slice(-4),anchor);
+}
+function makeupPriceNearTitle(text='', title='') {
+  const s=String(text||''); const t=cleanText(title);
+  if(!t) return null;
+  const idx=s.toLowerCase().indexOf(t.toLowerCase());
+  if(idx<0) return null;
+  // Product price is normally shortly after the product heading and before the volume selector.
+  const volumeRel=s.slice(idx,idx+9000).search(/(?:\+\s*)?(?:(?:усі|всі)\s+об['’ʼ]?єми|все\s+объ[её]мы)/i);
+  const end=volumeRel>=0 ? idx+volumeRel : Math.min(s.length,idx+5200);
+  const candidates=priceCandidates(s.slice(idx,end)).map(x=>({...x,index:x.index+idx}));
+  if(!candidates.length) return null;
+  // Prefer the first adjacent current/old pair in the product block; otherwise the first price.
+  for(let i=0;i<candidates.length-1;i++) {
+    if(candidates[i+1].index-candidates[i].index<=160) return Math.min(candidates[i].value,candidates[i+1].value);
   }
-  return pool[pool.length-1].value;
+  return candidates[0].value;
 }
 function makeupVariantNear(text='', anchor=-1) {
   if(anchor<0) return '';
@@ -620,13 +650,21 @@ function parseMakeupText(text='', pageUrl='', fallbackTitle='') {
   const volumeRx=/(?:\+\s*)?(?:(?:усі|всі)\s+об['’ʼ]?єми|все\s+объ[её]мы)\s*\(\s*\d+\s*\)/i;
   const volumeMatch=volumeRx.exec(s); const volumeIndex=volumeMatch?.index ?? -1;
   let codeIndex=-1;
-  if(productId){ const m=new RegExp(`(?:код\\s+товару|код\\s+товара|product\\s+code)\\s*:?\\s*${productId}`,'i').exec(s); codeIndex=m?.index ?? -1; }
-  let price=makeupPriceBeforeAnchor(s,volumeIndex);
-  if(!price) price=makeupPriceBeforeAnchor(s,codeIndex);
-  const variant=makeupVariantNear(s,volumeIndex>=0?volumeIndex:codeIndex);
+  if(productId){ const m=new RegExp(`(?:код\s+товару|код\s+товара|product\s+code)\s*:?\s*${productId}`,'i').exec(s); codeIndex=m?.index ?? -1; }
   const heading=s.match(/^#\s+(.+)$/m)?.[1] || s.match(/^Title:\s*(.+)$/mi)?.[1] || fallbackTitle;
+  let price=makeupPriceBeforeAnchor(s,volumeIndex);
+  if(!price) price=makeupPriceAroundAnchor(s,volumeIndex);
+  if(!price) price=makeupPriceBeforeAnchor(s,codeIndex);
+  if(!price) price=makeupPriceAroundAnchor(s,codeIndex);
+  const variant=makeupVariantNear(s,volumeIndex>=0?volumeIndex:codeIndex);
+  // If we already know the selected variant, try the exact occurrence as one more local price anchor.
+  if(!price && variant) {
+    const vi=s.toLowerCase().indexOf(variant.toLowerCase(),Math.max(0,volumeIndex));
+    if(vi>=0) price=makeupPriceAroundAnchor(s,vi,700,900);
+  }
   return {title:usableTitle(heading),price,variant,canonicalUrl:pageUrl,source:['makeup-text']};
 }
+
 function parseMakeupHtml(html, pageUrl) {
   const $=cheerio.load(html); const title=usableTitle(first($('h1').first().text(),$('meta[property="og:title"]').attr('content'),$('title').text()));
   const text=$('body').text(); const textData=parseMakeupText(text,pageUrl,title);
@@ -759,6 +797,89 @@ async function rozetkaApiFallback(productUrl) {
   }
   return {};
 }
+function makeupAlternateProductUrls(productUrl='') {
+  try {
+    const u=new URL(productUrl); const id=extractMakeupProductId(productUrl); if(!id) return [productUrl];
+    const origin=u.origin; return [...new Set([
+      productUrl,
+      `${origin}/ua/product/${id}/`,
+      `${origin}/product/${id}/`
+    ])];
+  } catch { return [productUrl]; }
+}
+function parseMakeupSearchHtml(html='', searchUrl='', productUrl='', fallbackTitle='') {
+  const $=cheerio.load(html); const id=extractMakeupProductId(productUrl); if(!id) return {};
+  let best={}; let bestScore=-1;
+  $(`a[href*="/product/${id}/"]`).each((_,el)=>{
+    const a=$(el); let node=a;
+    for(let depth=0;depth<7;depth++) {
+      node=node.parent(); if(!node.length) break;
+      const text=cleanText(node.text()); const prices=priceCandidates(text);
+      if(!prices.length) continue;
+      const title=usableTitle(first(a.attr('title'),a.text(),node.find('a[href*="/product/"]').first().text(),fallbackTitle));
+      const current=pickCurrentPriceFromNearby(prices,0);
+      const imgNode=node.find('img').first();
+      const image=normalizeImage(first(imgNode.attr('src'),imgNode.attr('data-src'),imgNode.attr('data-original')),searchUrl);
+      const score=(current?5:0)+(title?3:0)+(image?2:0)+(text.toLowerCase().includes(cleanText(fallbackTitle).toLowerCase())?3:0);
+      if(score>bestScore){bestScore=score;best={title,price:current,image,canonicalUrl:productUrl,source:['makeup-search-html']};}
+    }
+  });
+  return bestScore>0?best:{};
+}
+function parseMakeupSearchText(text='', productUrl='', fallbackTitle='') {
+  const s=String(text||''); const id=extractMakeupProductId(productUrl); if(!id) return {};
+  const markers=[`/ua/product/${id}/`,`/product/${id}/`,`product/${id}`];
+  let idx=-1; for(const marker of markers){ idx=s.indexOf(marker); if(idx>=0) break; }
+  if(idx<0 && fallbackTitle) idx=s.toLowerCase().indexOf(cleanText(fallbackTitle).toLowerCase());
+  if(idx<0) return {};
+  const start=Math.max(0,idx-1800), end=Math.min(s.length,idx+5200); const window=s.slice(start,end);
+  const prices=priceCandidates(window).map(x=>({...x,index:x.index+start}));
+  let price=null;
+  if(prices.length) {
+    // Prefer prices after the exact product link/title, but accept a nearby pair before it as some layouts render price first.
+    const after=prices.filter(x=>x.index>=idx).slice(0,4);
+    const before=prices.filter(x=>x.index<idx).slice(-4);
+    price=pickCurrentPriceFromNearby(after.length?after:before,idx);
+  }
+  const imageMatches=[]; const rx=/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)(?:\s+"[^"]*")?\)/g; let m;
+  while((m=rx.exec(window))) imageMatches.push({url:m[2],alt:m[1],context:window.slice(Math.max(0,m.index-120),Math.min(window.length,m.index+220)),nearProduct:true});
+  const image=chooseMakeupImage(imageMatches,fallbackTitle,productUrl);
+  return {title:usableTitle(fallbackTitle),price,image,canonicalUrl:productUrl,source:['makeup-search-reader']};
+}
+async function makeupSearchFallback(productUrl='', title='') {
+  const id=extractMakeupProductId(productUrl); if(!id) return {};
+  const q=cleanText(title) || id;
+  const searchUrls=[
+    `https://makeup.com.ua/ua/search/?q=${encodeURIComponent(q)}`,
+    `https://makeup.com.ua/search/?q=${encodeURIComponent(q)}`
+  ];
+  let out={};
+  for(const searchUrl of searchUrls) {
+    try {
+      const r=await fetch(searchUrl,{headers:{'user-agent':'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/150 Safari/537.36','accept-language':'uk-UA,uk;q=0.9,ru;q=0.8','accept':'text/html,application/xhtml+xml'},signal:AbortSignal.timeout(12000)});
+      if(r.ok){ const html=await r.text(); if(!looksLikeChallenge(html)) out=trustedMerge(out,parseMakeupSearchHtml(html,r.url,productUrl,title)); }
+    } catch {}
+    if(numericPrice(out.price)) break;
+    try {
+      const proxy=`https://r.jina.ai/${searchUrl}`;
+      const r=await fetch(proxy,{headers:{'user-agent':'Mozilla/5.0','accept':'text/plain'},signal:AbortSignal.timeout(18000)});
+      if(r.ok){ const text=await r.text(); out=trustedMerge(out,parseMakeupSearchText(text,productUrl,title)); }
+    } catch {}
+    if(numericPrice(out.price)) break;
+  }
+  return out;
+}
+async function makeupProductReaderFallback(productUrl='', title='') {
+  let out={};
+  for(const candidate of makeupAlternateProductUrls(productUrl)) {
+    const r=await readerFallback(candidate,'makeup.com.ua');
+    if(qualityOf(r)!=='none') out=trustedMerge(out,{...r,canonicalUrl:productUrl});
+    if(numericPrice(out.price)&&out.image&&out.variant) break;
+  }
+  if(!numericPrice(out.price)) out=trustedMerge(out,await makeupSearchFallback(productUrl,usableTitle(out.title)||title));
+  return out;
+}
+
 function parseReaderMarkdown(text, pageUrl) {
   const s = String(text || '');
   const heading = s.match(/^#\s+(.+)$/m)?.[1] || s.match(/^Title:\s*(.+)$/mi)?.[1] || '';
@@ -830,10 +951,9 @@ app.post('/api/product-preview', requireAuth, async (req, res) => {
   // Anti-bot / JS challenge fallback. MAKEUP needs SKU-aware parsing because its generic
   // structured data may expose the lowest price across all volumes instead of the selected variant.
   if (info.domain === 'makeup.com.ua') {
-    const makeupReader=await readerFallback(url,info.domain);
+    const makeupReader=await makeupProductReaderFallback(url,result.title);
     if (qualityOf(makeupReader)!=='none') result=trustedMerge(result,makeupReader);
-    // Microlink may still help with the title, but for MAKEUP we only accept its image when
-    // it passes the same anti-banner scoring used by our reader parser.
+    // Microlink may still help with the title/image only; its generic price is intentionally ignored for MAKEUP.
     if (!usableTitle(result.title) || !result.image) {
       const micro=await microlinkFallback(url);
       if(!usableTitle(result.title)&&usableTitle(micro.title)) result.title=micro.title;
