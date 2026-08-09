@@ -29,7 +29,7 @@ const params = new URLSearchParams(location.search);
 const state = {
   items: [], view: 'home', homeStatus: 'all', theme: localStorage.getItem('hochu-theme') || 'system',
   me: null, inviteToken: params.get('invite') || '', resetToken: params.get('reset') || '',
-  version:'1.2.3', admin: { overview:null, users:[], requests:[], resets:[] }
+  version:'1.2.4', aiInspector:null, admin: { overview:null, users:[], requests:[], resets:[] }
 };
 
 const els = {
@@ -42,8 +42,8 @@ const els = {
   allSearch:$('allSearch'), allStatus:$('allStatus'), allCategory:$('allCategory'), allStore:$('allStore'), allList:$('allList'),
   categoryGrid:$('categoryGrid'), storesGrid:$('storesGrid'), storeCountBadge:$('storeCountBadge'),
   aTotal:$('aTotal'), aSaved:$('aSaved'), aLeft:$('aLeft'), aBought:$('aBought'), aTotalBar:$('aTotalBar'), aSavedBar:$('aSavedBar'), aLeftBar:$('aLeftBar'), aBoughtBar:$('aBoughtBar'), categoryProgress:$('categoryProgress'),
-  profileName:$('profileName'), profileAvatar:$('profileAvatar'), profileRole:$('profileRole'), appVersionBadge:$('appVersionBadge'), profileAvatarPreview:$('profileAvatarPreview'), avatarFile:$('avatarFile'), chooseAvatar:$('chooseAvatar'), removeAvatar:$('removeAvatar'), avatarMessage:$('avatarMessage'), nameSetting:$('nameSetting'), accountSetting:$('accountSetting'), saveName:$('saveName'), logoutButton:$('logoutButton'), mobileAdd:$('mobileAdd'),
-  openInstallGuide:$('openInstallGuide'), installGuideDialog:$('installGuideDialog'), installGuideClose:$('installGuideClose'), installGuideDone:$('installGuideDone'), installStatus:$('installStatus'), installNow:$('installNow'),
+  profileName:$('profileName'), profileAvatar:$('profileAvatar'), profileRole:$('profileRole'), appVersionBadge:$('appVersionBadge'), mobileVersionBadge:$('mobileVersionBadge'), profileAvatarPreview:$('profileAvatarPreview'), avatarFile:$('avatarFile'), chooseAvatar:$('chooseAvatar'), removeAvatar:$('removeAvatar'), avatarMessage:$('avatarMessage'), nameSetting:$('nameSetting'), accountSetting:$('accountSetting'), saveName:$('saveName'), logoutButton:$('logoutButton'), mobileAdd:$('mobileAdd'), mobileNav:$('mobileNav'),
+  aiInspectorStatus:$('aiInspectorStatus'), aiInspectorModel:$('aiInspectorModel'), openInstallGuide:$('openInstallGuide'), installGuideDialog:$('installGuideDialog'), installGuideClose:$('installGuideClose'), installGuideDone:$('installGuideDone'), installStatus:$('installStatus'), installNow:$('installNow'),
   editor:$('editorDialog'), editorForm:$('editorForm'), editorTitle:$('editorTitle'), editorClose:$('editorClose'), cancelEditor:$('cancelEditor'), deleteItem:$('deleteItem'),
   itemId:$('itemId'), urlInput:$('urlInput'), fetchPreview:$('fetchPreview'), fetchMessage:$('fetchMessage'), titleInput:$('titleInput'), priceInput:$('priceInput'), savedInput:$('savedInput'), categoryInput:$('categoryInput'), priorityInput:$('priorityInput'), statusInput:$('statusInput'), storeInput:$('storeInput'), variantInput:$('variantInput'), imageInput:$('imageInput'), noteInput:$('noteInput'),
   previewImageWrap:$('previewImageWrap'), previewImage:$('previewImage'), previewPlaceholder:$('previewPlaceholder'), previewTitle:$('previewTitle'), previewStoreBadge:$('previewStoreBadge'), previewPrice:$('previewPrice'), previewSaved:$('previewSaved'), previewRemaining:$('previewRemaining'), previewProgressBar:$('previewProgressBar'), previewProgressText:$('previewProgressText'), visitSiteButton:$('visitSiteButton'),
@@ -200,17 +200,28 @@ function updateProfile(){
   const u=state.me; if(!u)return;
   els.profileName.textContent=u.name||u.username; setAvatarElement(els.profileAvatar,u); setAvatarElement(els.profileAvatarPreview,u);
   els.profileRole.textContent=u.role==='admin'?'администратор':'личный журнал'; els.nameSetting.value=u.name||''; els.accountSetting.value=`${u.username} · ${u.email}`;
-  if(els.appVersionBadge) els.appVersionBadge.textContent=`v${state.version||'1.2.3'}`;
+  if(els.appVersionBadge) els.appVersionBadge.textContent=`v${state.version||'1.2.4'}`; if(els.mobileVersionBadge) els.mobileVersionBadge.textContent=`v${state.version||'1.2.4'}`;
   els.removeAvatar?.classList.toggle('hidden',!safeAvatarData(u.avatar));
   els.adminNavItem.classList.toggle('hidden',u.role!=='admin'); els.adminSettingsCard.classList.toggle('hidden',u.role!=='admin');
+}
+
+
+function updateAiInspectorStatus(info={}){
+  state.aiInspector=info||{};
+  if(!els.aiInspectorStatus)return;
+  const enabled=Boolean(info?.configured); const model=info?.model||'gpt-5.6-terra';
+  els.aiInspectorStatus.className=`ai-status ${enabled?'active':'inactive'}`;
+  els.aiInspectorStatus.textContent=enabled?'Подключён ✓':'Не настроен';
+  if(els.aiInspectorModel)els.aiInspectorModel.textContent=enabled?model:'Добавь OPENAI_API_KEY в Railway Variables';
 }
 
 async function boot(){
   applyTheme(state.theme);
   if(state.resetToken){ await openResetFromToken(); return; }
   if(state.inviteToken) await validateInvite();
-  const me = await fetch('/api/me').then(r=>r.json()).catch(()=>({authenticated:false}));
-  state.version=me.version||state.version; if(els.appVersionBadge)els.appVersionBadge.textContent=`v${state.version}`;
+  const [me,health] = await Promise.all([fetch('/api/me').then(r=>r.json()).catch(()=>({authenticated:false})),fetch('/api/health').then(r=>r.json()).catch(()=>({}))]);
+  updateAiInspectorStatus(health.aiInspector||{});
+  state.version=me.version||health.version||state.version; if(els.appVersionBadge)els.appVersionBadge.textContent=`v${state.version}`; if(els.mobileVersionBadge)els.mobileVersionBadge.textContent=`v${state.version}`;
   if(!me.authenticated){ showLogin(); return; }
   state.me=me.user; updateProfile(); showApp(); await loadItems();
   if(state.me?.role==='admin') await refreshAdminBadge();
@@ -452,7 +463,7 @@ els.resetPasswordForm.addEventListener('submit',async e=>{e.preventDefault();if(
 els.resetBack.onclick=()=>{els.resetPasswordDialog.close();state.resetToken='';history.replaceState({},'',location.pathname);showLogin()};
 els.themeQuick.onclick=nextTheme; els.addTopButton.onclick=()=>openEditor(); els.mobileAdd.onclick=()=>openEditor();
 $$('[data-action="add"]').forEach(b=>b.onclick=()=>openEditor());
-$$('.nav-item,.mobile-nav-item').forEach(b=>b.onclick=()=>setView(b.dataset.view));
+$$('.nav-item,.mobile-nav-item').forEach(b=>b.onclick=()=>{if(b.dataset.mobileFilter==='bought'){els.allStatus.value='bought';setView('purchases');renderAllPurchases();return;}setView(b.dataset.view)});
 $$('.theme-card').forEach(b=>b.onclick=()=>applyTheme(b.dataset.themeChoice));
 els.saveName.onclick=async()=>{try{const d=await api('/api/profile',{method:'PATCH',body:JSON.stringify({name:els.nameSetting.value.trim()})});state.me=d.user;updateProfile()}catch(err){alert(err.message)}};
 els.chooseAvatar.onclick=()=>els.avatarFile.click();
@@ -501,6 +512,8 @@ els.fetchPreview.onclick=async()=>{
     if(d.category) els.categoryInput.value=d.category;
     if(d.canonicalUrl) els.urlInput.value=d.canonicalUrl;
     els.fetchMessage.textContent=d.message || (d.quality==='partial'?'Получены не все данные — проверь поля.':d.quality==='none'?'Не удалось получить данные автоматически. Заполни поля вручную.':'Готово. Проверь данные перед сохранением.');
+    if(d.inspector?.configured&&!d.inspector?.used&&d.quality!=='none') els.fetchMessage.title=`AI-инспектор ${d.inspector.model} подключён; обычный парсер уже дал уверенный результат или инспектор не изменил выбор.`;
+    if(d.inspector) updateAiInspectorStatus(d.inspector);
     els.fetchPreview.textContent=d.quality==='none'?'✦ Подтянуть':'✦ Подтянуть снова';
     updatePreview();
   }catch(err){
@@ -510,13 +523,34 @@ els.fetchPreview.onclick=async()=>{
 els.editorForm.addEventListener('submit',async e=>{e.preventDefault();const payload=itemPayload();try{if(els.itemId.value)await api(`/api/items/${els.itemId.value}`,{method:'PUT',body:JSON.stringify(payload)});else await api('/api/items',{method:'POST',body:JSON.stringify(payload)});els.editor.close();await loadItems()}catch(err){alert(err.message)}});
 els.deleteItem.onclick=async()=>{if(!els.itemId.value||!confirm('Удалить эту покупку из журнала?'))return;try{await api(`/api/items/${els.itemId.value}`,{method:'DELETE'});els.editor.close();await loadItems()}catch(err){alert(err.message)}};
 
+
+function initMobileDock(){
+  const dock=els.mobileNav; if(!dock)return;
+  let lastY=Math.max(0,window.scrollY||0),ticking=false;
+  const show=()=>dock.classList.remove('is-hidden');
+  const hide=()=>dock.classList.add('is-hidden');
+  const update=()=>{
+    const y=Math.max(0,window.scrollY||0),delta=y-lastY;
+    if(window.innerWidth>820||y<80) show();
+    else if(delta>9&&y>130) hide();
+    else if(delta<-7) show();
+    lastY=y;ticking=false;
+  };
+  window.addEventListener('scroll',()=>{if(!ticking){ticking=true;requestAnimationFrame(update)}},{passive:true});
+  window.addEventListener('resize',()=>{if(window.innerWidth>820)show();lastY=Math.max(0,window.scrollY||0)},{passive:true});
+  document.addEventListener('touchstart',e=>{const y=e.touches?.[0]?.clientY;if(window.innerWidth<=820&&Number.isFinite(y)&&y>window.innerHeight-105)show()},{passive:true});
+  dock.addEventListener('pointerdown',show,{passive:true});
+  $$('.mobile-nav-item,.mobile-add').forEach(b=>b.addEventListener('click',show));
+}
+initMobileDock();
+
 window.addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();els.homeSearch.focus()}if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='n'){e.preventDefault();openEditor()}});
 window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredInstallPrompt=e;updateInstallGuideStatus();});
 window.addEventListener('appinstalled',()=>{deferredInstallPrompt=null;updateInstallGuideStatus();});
 if('serviceWorker' in navigator){
   window.addEventListener('load',async()=>{
     try{
-      const reg=await navigator.serviceWorker.register('/sw.js?v=1.2.3',{updateViaCache:'none'});
+      const reg=await navigator.serviceWorker.register('/sw.js?v=1.2.4',{updateViaCache:'none'});
       await reg.update();
     }catch{}
   });

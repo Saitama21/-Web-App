@@ -1,6 +1,6 @@
 {
   "name": "hochu-wishlist-webapp",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "private": true,
   "type": "module",
   "engines": {
@@ -13,9 +13,10 @@
     "test:parser": "node --test tests/makeup-image-parser.test.mjs",
     "test:price": "node --test tests/price-history.test.mjs",
     "test:image": "node --test tests/generic-image-ranking.test.mjs",
-    "test": "node --test tests/generic-image-ranking.test.mjs tests/current-price.test.mjs tests/avatar-validation.test.mjs tests/price-history.test.mjs",
+    "test": "node --test tests/product-inspector.test.mjs tests/generic-image-ranking.test.mjs tests/current-price.test.mjs tests/avatar-validation.test.mjs tests/price-history.test.mjs",
     "test:current-price": "node --test tests/current-price.test.mjs",
-    "test:avatar": "node --test tests/avatar-validation.test.mjs"
+    "test:avatar": "node --test tests/avatar-validation.test.mjs",
+    "test:inspector": "node --test tests/product-inspector.test.mjs"
   },
   "dependencies": {
     "cheerio": "^1.0.1",
