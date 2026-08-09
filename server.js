@@ -8,7 +8,7 @@ import { priceHistorySummary } from './lib/price-history.js';
 const { Pool } = pg;
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
-const VERSION = '1.2.2';
+const VERSION = '1.2.3';
 const DATABASE_URL = String(process.env.DATABASE_URL || '');
 const LEGACY_APP_PASSWORD = String(process.env.APP_PASSWORD || '');
 const ADMIN_EMAIL = normalizeEmail(process.env.ADMIN_EMAIL || 'admin@hochu.local');
@@ -62,7 +62,7 @@ function cookieOptions(maxAge=SESSION_TTL_MS) {
 }
 function safeUser(u) {
   if (!u) return null;
-  return { id:u.id, name:u.name, username:u.username, email:u.email, role:u.role, status:u.status, createdAt:u.created_at||u.createdAt, lastLoginAt:u.last_login_at||u.lastLoginAt };
+  return { id:u.id, name:u.name, username:u.username, email:u.email, role:u.role, status:u.status, avatar:u.avatar||'', createdAt:u.created_at||u.createdAt, lastLoginAt:u.last_login_at||u.lastLoginAt };
 }
 function appOrigin(req) { return `${req.protocol}://${req.get('host')}`; }
 
@@ -104,11 +104,13 @@ async function initDb() {
       password_hash TEXT NOT NULL,
       role TEXT NOT NULL DEFAULT 'user',
       status TEXT NOT NULL DEFAULT 'active',
+      avatar TEXT NOT NULL DEFAULT '',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       last_login_at TIMESTAMPTZ
     )
   `);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar TEXT NOT NULL DEFAULT ''`);
   await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_idx ON users((LOWER(email)))`);
   await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS users_username_lower_idx ON users((LOWER(username)))`);
   await pool.query(`
@@ -264,7 +266,7 @@ async function ensureDbAdmin() {
 }
 async function ensureMemoryAdmin() {
   if (mem.users.some(u=>u.role==='admin') || !ADMIN_PASSWORD) return;
-  mem.users.push({id:crypto.randomUUID(),name:ADMIN_NAME,username:ADMIN_USERNAME,email:ADMIN_EMAIL,password_hash:await hashPassword(ADMIN_PASSWORD),role:'admin',status:'active',createdAt:new Date().toISOString(),lastLoginAt:null});
+  mem.users.push({id:crypto.randomUUID(),name:ADMIN_NAME,username:ADMIN_USERNAME,email:ADMIN_EMAIL,password_hash:await hashPassword(ADMIN_PASSWORD),role:'admin',status:'active',avatar:'',createdAt:new Date().toISOString(),lastLoginAt:null});
 }
 
 async function getSessionUser(req) {
@@ -394,7 +396,27 @@ app.post('/api/password-reset/complete', rateLimit('reset-complete',8,10*60_000)
 });
 
 // ----- Authenticated profile -----
+function validateAvatarDataUrl(value='') {
+  const raw=String(value||'').trim();
+  if(!raw) return {ok:true,value:''};
+  const m=raw.match(/^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/=]+)$/i);
+  if(!m) return {ok:false,error:'Поддерживаются только JPG, PNG и WebP.'};
+  let buf; try{buf=Buffer.from(m[2],'base64');}catch{return {ok:false,error:'Не удалось прочитать изображение.'};}
+  if(!buf.length || buf.length>360*1024) return {ok:false,error:'Аватар слишком большой. Выбери другое фото.'};
+  const kind=m[1].toLowerCase();
+  const png=buf.length>8&&buf.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]));
+  const jpg=buf.length>3&&buf[0]===0xff&&buf[1]===0xd8&&buf[2]===0xff;
+  const webp=buf.length>12&&buf.subarray(0,4).toString('ascii')==='RIFF'&&buf.subarray(8,12).toString('ascii')==='WEBP';
+  if((kind==='png'&&!png)||(kind==='jpeg'&&!jpg)||(kind==='webp'&&!webp)) return {ok:false,error:'Файл изображения повреждён или имеет неверный формат.'};
+  return {ok:true,value:`data:image/${kind};base64,${buf.toString('base64')}`};
+}
 app.patch('/api/profile', requireAuth, async (req,res)=>{const name=cleanShort(req.body?.name,80);if(!name)return res.status(400).json({error:'Имя не может быть пустым.'});if(pool){const q=await pool.query('UPDATE users SET name=$1,updated_at=NOW() WHERE id=$2 RETURNING *',[name,req.user.id]);res.json({user:safeUser(q.rows[0])});}else{req.user.name=name;res.json({user:safeUser(req.user)});}});
+app.patch('/api/profile/avatar', requireAuth, async (req,res)=>{
+  const checked=validateAvatarDataUrl(req.body?.avatar||'');
+  if(!checked.ok) return res.status(400).json({error:checked.error});
+  if(pool){const q=await pool.query('UPDATE users SET avatar=$1,updated_at=NOW() WHERE id=$2 RETURNING *',[checked.value,req.user.id]);return res.json({user:safeUser(q.rows[0])});}
+  req.user.avatar=checked.value; res.json({user:safeUser(req.user)});
+});
 
 // ----- User-owned wishlist -----
 app.get('/api/items', requireAuth, async (req,res)=>{
@@ -468,13 +490,13 @@ app.get('/api/admin/overview', requireAuth, requireAdmin, async (req,res)=>{
   res.json({users:{total:mem.users.length,active:mem.users.filter(x=>x.status==='active').length,blocked:mem.users.filter(x=>x.status==='blocked').length},pendingAccess:mem.accessRequests.filter(x=>x.status==='pending').length,pendingResets:mem.resetRequests.filter(x=>x.status==='pending').length,wishlist:{items:mem.items.length,totalPrice:mem.items.reduce((s,x)=>s+x.price,0),totalSaved:mem.items.reduce((s,x)=>s+x.saved,0)}});
 });
 app.get('/api/admin/users', requireAuth, requireAdmin, async (req,res)=>{
-  if(pool){const q=await pool.query(`SELECT u.id,u.name,u.username,u.email,u.role,u.status,u.created_at,u.last_login_at,COUNT(w.id)::int item_count,COALESCE(SUM(w.price),0) total_price,COALESCE(SUM(w.saved),0) total_saved FROM users u LEFT JOIN wishlist_items w ON w.user_id=u.id GROUP BY u.id ORDER BY CASE WHEN u.role='admin' THEN 0 ELSE 1 END,u.created_at`);return res.json(q.rows.map(x=>({...safeUser(x),itemCount:x.item_count,totalPrice:Number(x.total_price),totalSaved:Number(x.total_saved)})));}
+  if(pool){const q=await pool.query(`SELECT u.id,u.name,u.username,u.email,u.role,u.status,u.avatar,u.created_at,u.last_login_at,COUNT(w.id)::int item_count,COALESCE(SUM(w.price),0) total_price,COALESCE(SUM(w.saved),0) total_saved FROM users u LEFT JOIN wishlist_items w ON w.user_id=u.id GROUP BY u.id ORDER BY CASE WHEN u.role='admin' THEN 0 ELSE 1 END,u.created_at`);return res.json(q.rows.map(x=>({...safeUser(x),itemCount:x.item_count,totalPrice:Number(x.total_price),totalSaved:Number(x.total_saved)})));}
   res.json(mem.users.map(u=>{const arr=mem.items.filter(i=>i.userId===u.id);return{...safeUser(u),itemCount:arr.length,totalPrice:arr.reduce((s,x)=>s+x.price,0),totalSaved:arr.reduce((s,x)=>s+x.saved,0)}}));
 });
 app.get('/api/admin/access-requests', requireAuth, requireAdmin, async (req,res)=>{if(pool){const q=await pool.query(`SELECT r.id,r.name,r.username,r.email,r.message,r.status,r.created_at,i.label invite_label FROM access_requests r LEFT JOIN invitations i ON i.id=r.invitation_id WHERE r.status='pending' ORDER BY r.created_at`);return res.json(q.rows);}res.json(mem.accessRequests.filter(x=>x.status==='pending'));});
 app.post('/api/admin/access-requests/:id/approve', requireAuth, requireAdmin, async (req,res)=>{
   if(pool){const client=await pool.connect();try{await client.query('BEGIN');const q=await client.query(`SELECT * FROM access_requests WHERE id=$1 AND status='pending' FOR UPDATE`,[req.params.id]);if(!q.rowCount){await client.query('ROLLBACK');return res.status(404).json({error:'Заявка не найдена.'});}const r=q.rows[0];const dup=await client.query('SELECT 1 FROM users WHERE LOWER(email)=LOWER($1) OR LOWER(username)=LOWER($2) LIMIT 1',[r.email,r.username]);if(dup.rowCount){await client.query('ROLLBACK');return res.status(409).json({error:'Пользователь с таким логином или email уже существует.'});}const id=crypto.randomUUID();await client.query(`INSERT INTO users(id,name,username,email,password_hash,role,status) VALUES($1,$2,$3,$4,$5,'user','active')`,[id,r.name,r.username,r.email,r.password_hash]);await client.query(`UPDATE access_requests SET status='approved',reviewed_at=NOW(),reviewed_by=$2 WHERE id=$1`,[r.id,req.user.id]);if(r.invitation_id)await client.query(`UPDATE invitations SET uses=uses+1,active=CASE WHEN uses+1>=max_uses THEN FALSE ELSE active END WHERE id=$1`,[r.invitation_id]);await client.query('COMMIT');await audit(req.user.id,'access_approved',id,{requestId:r.id});return res.json({ok:true});}catch(e){await client.query('ROLLBACK').catch(()=>{});throw e;}finally{client.release();}}
-  const r=mem.accessRequests.find(x=>x.id===req.params.id&&x.status==='pending');if(!r)return res.status(404).json({error:'Заявка не найдена.'});const id=crypto.randomUUID();mem.users.push({id,name:r.name,username:r.username,email:r.email,password_hash:r.passwordHash,role:'user',status:'active',createdAt:new Date().toISOString()});r.status='approved';const inv=mem.invitations.find(i=>i.id===r.invitationId);if(inv){inv.uses++;if(inv.uses>=inv.maxUses)inv.active=false;}await audit(req.user.id,'access_approved',id);res.json({ok:true});
+  const r=mem.accessRequests.find(x=>x.id===req.params.id&&x.status==='pending');if(!r)return res.status(404).json({error:'Заявка не найдена.'});const id=crypto.randomUUID();mem.users.push({id,name:r.name,username:r.username,email:r.email,password_hash:r.passwordHash,role:'user',status:'active',avatar:'',createdAt:new Date().toISOString()});r.status='approved';const inv=mem.invitations.find(i=>i.id===r.invitationId);if(inv){inv.uses++;if(inv.uses>=inv.maxUses)inv.active=false;}await audit(req.user.id,'access_approved',id);res.json({ok:true});
 });
 app.post('/api/admin/access-requests/:id/decline', requireAuth, requireAdmin, async (req,res)=>{if(pool){const q=await pool.query(`UPDATE access_requests SET status='declined',reviewed_at=NOW(),reviewed_by=$2 WHERE id=$1 AND status='pending' RETURNING id`,[req.params.id,req.user.id]);if(!q.rowCount)return res.status(404).json({error:'Заявка не найдена.'});}else{const r=mem.accessRequests.find(x=>x.id===req.params.id&&x.status==='pending');if(!r)return res.status(404).json({error:'Заявка не найдена.'});r.status='declined';}await audit(req.user.id,'access_declined',null,{requestId:req.params.id});res.json({ok:true});});
 app.get('/api/admin/reset-requests', requireAuth, requireAdmin, async (req,res)=>{if(pool){const q=await pool.query(`SELECT r.id,r.email,r.created_at,u.id user_id,u.name,u.username FROM password_reset_requests r JOIN users u ON u.id=r.user_id WHERE r.status='pending' ORDER BY r.created_at`);return res.json(q.rows);}res.json(mem.resetRequests.filter(x=>x.status==='pending').map(r=>({...r,user:mem.users.find(u=>u.id===r.userId)})));});
@@ -543,6 +565,78 @@ function parsePrice(text) {
   }
   return null;
 }
+
+function priceIsOldIdentity(text='') {
+  return /(?:\bold[-_ ]*price\b|\bprice[-_ ]*old\b|previous[-_ ]*price|regular[-_ ]*price|base[-_ ]*price|original[-_ ]*price|cross(?:ed)?|strike|line-through|was[-_ ]?price|стара\s+ц[іе]на|старая\s+цена|стара\s+варт|старая\s+стоим|до\s+знижк|до\s+скидк)/i.test(String(text||''));
+}
+function priceIsCurrentIdentity(text='') {
+  return /(?:current[-_ ]*price|actual[-_ ]*price|final[-_ ]*price|sale[-_ ]*price|special[-_ ]*price|new[-_ ]*price|price[-_ ]*(?:current|actual|final|sale|special|new)|discount[-_ ]*price|актуальн|поточн|ціна[-_ ]?зі[-_ ]?знижк|цена[-_ ]?со[-_ ]?скидк)/i.test(String(text||''));
+}
+
+function promotionalCurrentPrice(text='') {
+  const s=String(text||'').replace(/\u00a0/g,' ');
+  const currency='(?:₴|грн|UAH|uah)';
+  // Typical sale layout: OLD PRICE, -DISCOUNT, CURRENT PRICE.
+  const triplet=new RegExp(`(\\d[\\d\\s.,]{0,16})\\s*${currency}\\s*[-−–]\\s*(\\d[\\d\\s.,]{0,16})\\s*${currency}\\s*(\\d[\\d\\s.,]{0,16})\\s*${currency}`,'i');
+  const m=s.match(triplet);
+  if(m){
+    const old=numericPrice(m[1]),discount=numericPrice(m[2]),current=numericPrice(m[3]);
+    if(old&&discount&&current&&old>current&&Math.abs((old-current)-discount)<=Math.max(5,old*.02)) return current;
+  }
+  // Old/new pair near an explicit sale/discount marker.
+  const pairRx=new RegExp(`(\\d[\\d\\s.,]{0,16})\\s*${currency}([\\s\\S]{0,100}?)(\\d[\\d\\s.,]{0,16})\\s*${currency}`,'ig');
+  let p;
+  while((p=pairRx.exec(s))){
+    const a=numericPrice(p[1]),b=numericPrice(p[3]),between=p[2]||'';
+    if(a&&b&&a>b&&/(?:зниж|скид|sale|discount|акц|[-−–]\\s*\\d)/i.test(between)) return b;
+  }
+  return null;
+}
+
+function genericCurrentPrice($, productJsonLd=null) {
+  const candidates=[];
+  const add=(value,score,identity='',source='dom')=>{const n=numericPrice(value);if(!n||n>100_000_000)return;candidates.push({value:n,score,identity:String(identity||''),source});};
+  const offers=productJsonLd?.offers ? (Array.isArray(productJsonLd.offers)?productJsonLd.offers:[productJsonLd.offers]) : [];
+  for(const offer of offers.slice(0,10)) {
+    add(first(offer?.price,offer?.lowPrice),46,'jsonld offer','jsonld');
+    if(offer?.priceSpecification) add(first(offer.priceSpecification.price,offer.priceSpecification.minPrice),48,'jsonld priceSpecification','jsonld');
+  }
+  $('meta[property="product:price:amount"],meta[itemprop="price"]').each((_,el)=>add($(el).attr('content'),72,'meta product price','meta'));
+
+  const roots=$('[class*="price"],[id*="price"],[class*="cost"],[id*="cost"],[data-price],[data-current-price],[data-sale-price],[itemprop="price"]').slice(0,500);
+  const nodes=[]; const seen=new Set();
+  roots.each((_,el)=>{
+    if(!seen.has(el)){seen.add(el);nodes.push(el);}
+    $(el).find('*').slice(0,45).each((__,child)=>{if(!seen.has(child)){seen.add(child);nodes.push(child);}});
+  });
+  for(const el of nodes.slice(0,1800)) {
+    const node=$(el), tag=String(el.tagName||'').toLowerCase();
+    const ancestors=node.parents().slice(0,4);
+    const identity=[tag,node.attr('class'),node.attr('id'),node.attr('itemprop'),node.attr('style'),ancestors.map((_,a)=>`${$(a).attr('class')||''} ${$(a).attr('id')||''}`).get().join(' ')].filter(Boolean).join(' ');
+    const productScope=Boolean(node.closest('[itemtype*="Product"],[itemscope][itemtype*="product"],[class*="product"],[id*="product"],[class*="goods"],[id*="goods"],main').length);
+    let score=24+(productScope?24:0)+(node.is('[itemprop="price"]')?58:0)+(node.is('[data-price],[data-current-price],[data-sale-price]')?44:0)+(/^(?:strong|b)$/i.test(tag)?12:0);
+    if(priceIsCurrentIdentity(identity)) score+=105;
+    if(priceIsOldIdentity(identity)||node.is('del,s,strike')) score-=190;
+    if(/display\s*:\s*none|visibility\s*:\s*hidden/i.test(node.attr('style')||'')) score-=90;
+    const attrs=['data-current-price','data-sale-price','data-final-price','data-price','content','value'];
+    let hadAttr=false;
+    for(const a of attrs){const v=node.attr(a);if(v){hadAttr=true;add(v,score+12,identity,`attr:${a}`);}}
+    let direct=cleanText(node.clone().children().remove().end().text());
+    if(!direct && !hadAttr && node.children().length===0) direct=cleanText(node.text());
+    if(direct) {
+      const vals=priceCandidates(direct);
+      if(vals.length===1) add(vals[0].value,score,identity,'text');
+      else if(vals.length>1 && priceIsCurrentIdentity(identity)) add(Math.min(...vals.map(x=>x.value)),score,identity,'text-pair');
+    }
+  }
+  const salePrice=promotionalCurrentPrice(cleanText($('body').text()).slice(0,360000));
+  if(salePrice) add(salePrice,220,'sale triplet/current price','sale-pattern');
+  if(!candidates.length) return null;
+  candidates.sort((a,b)=>b.score-a.score || a.value-b.value);
+  const best=candidates[0];
+  return best.score>=20?best.value:null;
+}
+
 function normalizeImage(value, baseUrl='', depth=0) {
   if (depth > 8 || value === undefined || value === null) return '';
 
@@ -625,7 +719,7 @@ function productTitleWords(title='') {
   return cleanText(title).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(x=>x.length>=3).slice(0,14);
 }
 function productImageNegative(text='') {
-  return /(?:banner|promo|advert|advertis|campaign|sale|discount|offer|gift|sprite|favicon|logo|icon|badge|avatar|payment|delivery|shipping|guarantee|warranty|newsletter|subscribe|social|header|footer|menu|nav|recommend|related|similar|accessor|recent|viewed|pixel|tracking|google|facebook|telegram|viber|акц(?:і|и)|зниж|скид|подар|реклам|баннер|банер|логотип|ікон|икон|достав|гарант|підпис|подпис|схож|похож|рекоменд|аксесуар)/i.test(String(text||''));
+  return /(?:\/upload\/rk\/|\/banners?\/|\/promos?\/|banner|promo|advert|advertis|campaign|sale|discount|offer|gift|sprite|favicon|logo|icon|badge|avatar|payment|delivery|shipping|guarantee|warranty|newsletter|subscribe|social|header|footer|menu|nav|recommend|related|similar|accessor|recent|viewed|pixel|tracking|google|facebook|telegram|viber|акц(?:і|и)|зниж|скид|подар|реклам|баннер|банер|логотип|ікон|икон|достав|гарант|підпис|подпис|схож|похож|рекоменд|аксесуар)/i.test(String(text||''));
 }
 function productImagePositive(text='') {
   return /(?:product|goods|item|detail|gallery|photo|image|picture|media|slider|swiper|slick|fotorama|zoom|thumb|preview|main|товар|галере|фото|зображ|изображ)/i.test(String(text||''));
@@ -652,6 +746,8 @@ function genericProductImageScore(candidate={}, title='') {
   if(candidate.fromOg) score+=16;
   if(candidate.fromTwitter) score+=10;
   if(candidate.fromMain) score+=8;
+  if(candidate.fromReader) score+=12;
+  if(candidate.nearProduct) score+=34;
   if(candidate.existing) score+=4;
   if(productImagePositive(identity)) score+=18;
   score+=titleImageMatchScore(`${candidate.alt||''} ${candidate.title||''} ${candidate.context||''}`,title);
@@ -677,7 +773,7 @@ function rankGenericProductImages(candidates=[], title='', pageUrl='') {
     const url=normalizeImage(c.url||c.src||'',pageUrl); if(!url) continue;
     const merged={...(byUrl.get(url)||{}),...c,url,baseUrl:pageUrl};
     // Preserve positive provenance when the same URL appears in several places.
-    for(const k of ['fromJsonLd','fromEmbeddedJson','fromItemprop','fromGallery','fromProductScope','fromImageLink','fromOg','fromTwitter','fromMain','existing']) merged[k]=Boolean((byUrl.get(url)||{})[k]||c[k]);
+    for(const k of ['fromJsonLd','fromEmbeddedJson','fromItemprop','fromGallery','fromProductScope','fromImageLink','fromOg','fromTwitter','fromMain','fromReader','nearProduct','existing']) merged[k]=Boolean((byUrl.get(url)||{})[k]||c[k]);
     const prev=byUrl.get(url);
     if(prev){ merged.context=`${prev.context||''} ${c.context||''}`.trim(); merged.alt=prev.alt||c.alt||''; merged.title=prev.title||c.title||''; }
     byUrl.set(url,merged);
@@ -688,13 +784,35 @@ function rankGenericProductImages(candidates=[], title='', pageUrl='') {
 }
 function nodeImageUrls($, el, pageUrl='') {
   const node=$(el); const out=[];
-  const attrs=['data-zoom-image','data-large-image','data-full','data-original','data-src','data-lazy-src','data-lazy','data-image','data-thumb','src'];
+  const attrs=['data-zoom-image','data-large-image','data-full','data-original','data-original-src','data-src','data-src2','data-lazy-src','data-lazy','data-image','data-image-src','data-big','data-zoom','data-thumb','src'];
   for(const a of attrs){ const u=normalizeImage(node.attr(a),pageUrl); if(u&&!out.includes(u)) out.push(u); }
-  const ss=largestSrcsetUrl(first(node.attr('srcset'),node.attr('data-srcset')),pageUrl); if(ss&&!out.includes(ss)) out.unshift(ss);
+  const ss=largestSrcsetUrl(first(node.attr('srcset'),node.attr('data-srcset'),node.attr('data-lazy-srcset')),pageUrl); if(ss&&!out.includes(ss)) out.unshift(ss);
+  const style=String(node.attr('style')||''); const sm=style.match(/(?:background(?:-image)?|content)\s*:\s*url\([\"']?([^\)\"']+)/i); if(sm){const u=normalizeImage(sm[1],pageUrl);if(u&&!out.includes(u))out.unshift(u);}
   const parentHref=normalizeImage(node.closest('a').attr('href'),pageUrl);
   if(parentHref&&/\.(?:avif|webp|jpe?g|png|gif)(?:[?#]|$)/i.test(parentHref)&&!out.includes(parentHref)) out.unshift(parentHref);
   return out;
 }
+
+function collectEmbeddedProductImageCandidates(root, title='', pageUrl='') {
+  const out=[],queue=[root],seen=new Set(); let visited=0;
+  const titleWords=productTitleWords(title);
+  while(queue.length&&visited++<10000){
+    const x=queue.shift(); if(!x||typeof x!=='object'||seen.has(x))continue; seen.add(x);
+    if(Array.isArray(x)){for(const v of x.slice(0,120))if(v&&typeof v==='object')queue.push(v);continue;}
+    const type=cleanText(x['@type']||x.type||'').toLowerCase();
+    const name=usableTitle(first(x.name,x.title,x.productName,x.goods_name,x.goodsName));
+    const hay=`${name} ${cleanText(x.slug||x.code||x.sku||'')}`.toLowerCase();
+    const hits=titleWords.filter(w=>hay.includes(w)).length;
+    const productish=type==='product'||/(?:product|goods|item)/i.test(type)||hits>=Math.min(2,titleWords.length||2);
+    if(productish){
+      const urls=imageUrlsFromValue(first(x.image,x.images,x.photo,x.photos,x.pictures,x.gallery,x.media,x.mainImage,x.imageUrl),pageUrl).slice(0,20);
+      for(const url of urls) out.push({url,fromEmbeddedJson:true,fromProductScope:true,sourceType:'embedded-product',alt:name||title,context:`embedded product ${name||''}`});
+    }
+    for(const v of Object.values(x))if(v&&typeof v==='object')queue.push(v);
+  }
+  return out;
+}
+
 function collectGenericProductImageCandidates($, productJsonLd=null, pageUrl='', title='') {
   const out=[]; const push=(url,meta={})=>{ const u=normalizeImage(url,pageUrl); if(u) out.push({url:u,...meta}); };
   for(const u of imageUrlsFromValue(productJsonLd?.image,pageUrl)) push(u,{fromJsonLd:true,sourceType:'jsonld-product',alt:title});
@@ -727,6 +845,12 @@ function collectGenericProductImageCandidates($, productJsonLd=null, pageUrl='',
     const context=cleanText(`${node.attr('title')||''} ${node.attr('aria-label')||''} ${structural}`).slice(0,1200);
     const vals=[node.attr('data-zoom-image'),node.attr('data-large-image'),node.attr('data-original'),node.attr('data-image'),node.attr('href')];
     for(const v of vals){ const u=normalizeImage(v,pageUrl); if(u&&/\.(?:avif|webp|jpe?g|png|gif)(?:[?#]|$)/i.test(u)) push(u,{context,className:structural,fromGallery:productImagePositive(structural),fromProductScope:true,fromImageLink:true,sourceType:'dom-link'}); }
+  });
+  $('[style*="url("],[data-background],[data-bg],[data-background-image]').slice(0,500).each((_,el)=>{
+    const node=$(el); const structural=`${node.attr('class')||''} ${node.attr('id')||''} ${node.parent().attr('class')||''}`;
+    const raw=[node.attr('style'),node.attr('data-background'),node.attr('data-bg'),node.attr('data-background-image')].filter(Boolean).join(' ');
+    const rx=/url\([\"']?([^\)\"']+)/ig; let m;
+    while((m=rx.exec(raw))){push(m[1],{context:structural,className:structural,fromGallery:productImagePositive(structural),fromProductScope:Boolean(node.closest('[itemtype*="Product"],[class*="product"],[id*="product"],[class*="gallery"],[class*="slider"]').length),sourceType:'style'});}
   });
   return rankGenericProductImages(out,title,pageUrl);
 }
@@ -1167,18 +1291,16 @@ function parseHtmlProduct(html, pageUrl) {
     $('title').text()
   ));
   const rankedImages=collectGenericProductImageCandidates($,p,pageUrl,title);
+  const liveDomPrice=genericCurrentPrice($,p);
   let data = {
     title,
     image: rankedImages[0]?.url || '',
     imageCandidates: rankedImages.map(x=>x.url).slice(0,20),
     imageCandidateDetails: rankedImages.slice(0,20),
-    price: numericPrice(first(
-      offer?.price,
+    price: liveDomPrice || numericPrice(first(
       $('meta[property="product:price:amount"]').attr('content'),
       $('[itemprop="price"]').first().attr('content'),
-      $('[itemprop="price"]').first().text(),
-      $('[data-price]').first().attr('data-price'),
-      $('.product-item__price,.product-price,.product__price,.price').first().text()
+      offer?.price
     )),
     canonicalUrl: first($('link[rel="canonical"]').attr('href'), pageUrl),
     source: ['html']
@@ -1202,11 +1324,14 @@ function parseHtmlProduct(html, pageUrl) {
     }
     if (parsed) {
       const picked=pickProductLike(parsed,pageUrl);
-      const embeddedImages=imageUrlsFromValue([picked.image,parsed?.image,parsed?.images,parsed?.photos],pageUrl).slice(0,12);
-      const next={...picked,source:['embedded-json'],imageCandidates:embeddedImages,imageCandidateDetails:embeddedImages.map(url=>({url,fromEmbeddedJson:true,sourceType:'embedded-json',alt:picked.title||title}))};
+      const embeddedDetails=collectEmbeddedProductImageCandidates(parsed,data.title||picked.title||title,pageUrl);
+      const embeddedImages=[...new Set([...imageUrlsFromValue([picked.image,parsed?.image,parsed?.images,parsed?.photos],pageUrl),...embeddedDetails.map(x=>x.url)])].slice(0,30);
+      const next={...picked,source:['embedded-json'],imageCandidates:embeddedImages,imageCandidateDetails:[...embeddedDetails,...embeddedImages.map(url=>({url,fromEmbeddedJson:true,sourceType:'embedded-json',alt:picked.title||title}))]};
       data = mergeProduct(data,next);
     }
   });
+  // A visible current/sale price must not be overwritten by stale embedded JSON (common on discounted products).
+  if(liveDomPrice) data.price=liveDomPrice;
   // Re-rank after embedded JSON has contributed candidates.
   const reranked=rankGenericProductImages([...(data.imageCandidateDetails||[]),...(data.imageCandidates||[]).map(url=>({url})),...(data.image?[{url:data.image}]:[])],data.title,pageUrl);
   if(reranked.length){data.image=reranked[0].url;data.imageCandidates=reranked.map(x=>x.url).slice(0,20);data.imageCandidateDetails=reranked.slice(0,20);}
@@ -1361,10 +1486,20 @@ async function makeupProductReaderFallback(productUrl='', title='') {
 }
 
 function parseReaderMarkdown(text, pageUrl) {
-  const s = String(text || '');
-  const heading = s.match(/^#\s+(.+)$/m)?.[1] || s.match(/^Title:\s*(.+)$/mi)?.[1] || '';
-  const image = s.match(/!\[[^\]]*\]\((https?:\/\/[^)\s]+)\)/)?.[1] || '';
-  return { title: usableTitle(heading), price: parsePrice(s.slice(0,220000)), image: normalizeImage(image,pageUrl), canonicalUrl:pageUrl, source:['reader'] };
+  const s=String(text||'');
+  const titleLine=s.match(/^Title:\s*(.+)$/mi)?.[1]||'';
+  const h1s=[...s.matchAll(/^#\s+(.+)$/gm)].map(m=>({title:usableTitle(m[1]),index:m.index||0})).filter(x=>x.title);
+  let heading=usableTitle(titleLine)||h1s[0]?.title||'';
+  // Prefer an H1 that looks like a product heading rather than a generic site title.
+  if(h1s.length>1){const best=h1s.sort((a,b)=>productTitleWords(b.title).length-productTitleWords(a.title).length)[0];if(best?.title)heading=best.title;}
+  const titleIndex=heading?s.toLowerCase().indexOf(heading.toLowerCase()):-1;
+  const images=[]; const rx=/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)(?:\s+"[^"]*")?\)/g; let m;
+  while((m=rx.exec(s))){
+    const idx=m.index||0; const context=s.slice(Math.max(0,idx-650),Math.min(s.length,idx+650));
+    images.push({url:m[2],alt:m[1],context,fromReader:true,nearProduct:titleIndex>=0&&Math.abs(idx-titleIndex)<6500,fromProductScope:titleIndex>=0&&Math.abs(idx-titleIndex)<4500,sourceType:'reader'});
+  }
+  const ranked=rankGenericProductImages(images,heading,pageUrl);
+  return {title:heading,price:promotionalCurrentPrice(s.slice(0,300000))||parsePrice(s.slice(0,220000)),image:ranked[0]?.url||'',imageCandidates:ranked.map(x=>x.url).slice(0,16),imageCandidateDetails:ranked.slice(0,16),canonicalUrl:pageUrl,source:['reader']};
 }
 async function readerFallback(productUrl, domain='') {
   try {
@@ -1441,7 +1576,8 @@ app.post('/api/product-preview', requireAuth, async (req, res) => {
       result.source=[...new Set([...(result.source||[]),...(micro.source||[])])];
     }
   } else {
-    if (qualityOf(result) !== 'complete') result = mergeProduct(result, await readerFallback(url,info.domain));
+    const suspiciousImage=!result.image || productImageNegative(result.image);
+    if (qualityOf(result) !== 'complete' || suspiciousImage) result = mergeProduct(result, await readerFallback(url,info.domain));
     if (qualityOf(result) !== 'complete') result = mergeProduct(result, await microlinkFallback(url));
   }
 
@@ -1480,7 +1616,7 @@ app.post('/api/product-preview', requireAuth, async (req, res) => {
 
 app.get('*', (req, res) => res.sendFile(`${process.cwd()}/public/index.html`));
 
-export { parseMakeupReaderMarkdown, parseMakeupSearchHtml, parseMakeupSearchText, rankMakeupImages, makeupImageScore, parseHtmlProduct, rankGenericProductImages, genericProductImageScore, imageDimensionsFromBuffer, priceHistorySummary };
+export { parseMakeupReaderMarkdown, parseMakeupSearchHtml, parseMakeupSearchText, rankMakeupImages, makeupImageScore, parseHtmlProduct, rankGenericProductImages, genericProductImageScore, genericCurrentPrice, promotionalCurrentPrice, parseReaderMarkdown, validateAvatarDataUrl, imageDimensionsFromBuffer, priceHistorySummary };
 
 if (process.env.HOCHU_TEST !== '1') {
   initDb().then(() => {

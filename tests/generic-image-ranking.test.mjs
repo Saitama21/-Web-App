@@ -58,3 +58,12 @@ test('Touch Huion official product image beats a generic rk promo candidate',()=
   ],title,page);
   assert.equal(ranked[0].url,'https://touch.com.ua/upload/iblock/76b/jnmx050ctkzqqygqfukldguy8yz64zir.jpg');
 });
+
+
+test('Touch upload/rk asset is rejected even when banner metadata is missing',()=>{
+  const ranked=rankGenericProductImages([
+    {url:'https://touch.com.ua/upload/rk/a3a/000ozr36eyuhnhgx3e9wr0qkpm23zm8.jpg',fromOg:true},
+    {url:'https://touch.com.ua/upload/iblock/76b/jnmx050ctkzqqygqfukldguy8yz64zir.jpg',fromGallery:true,fromProductScope:true,alt:title}
+  ],title,page);
+  assert.equal(ranked[0].url,'https://touch.com.ua/upload/iblock/76b/jnmx050ctkzqqygqfukldguy8yz64zir.jpg');
+});

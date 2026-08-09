@@ -29,7 +29,7 @@ const params = new URLSearchParams(location.search);
 const state = {
   items: [], view: 'home', homeStatus: 'all', theme: localStorage.getItem('hochu-theme') || 'system',
   me: null, inviteToken: params.get('invite') || '', resetToken: params.get('reset') || '',
-  admin: { overview:null, users:[], requests:[], resets:[] }
+  version:'1.2.3', admin: { overview:null, users:[], requests:[], resets:[] }
 };
 
 const els = {
@@ -42,7 +42,7 @@ const els = {
   allSearch:$('allSearch'), allStatus:$('allStatus'), allCategory:$('allCategory'), allStore:$('allStore'), allList:$('allList'),
   categoryGrid:$('categoryGrid'), storesGrid:$('storesGrid'), storeCountBadge:$('storeCountBadge'),
   aTotal:$('aTotal'), aSaved:$('aSaved'), aLeft:$('aLeft'), aBought:$('aBought'), aTotalBar:$('aTotalBar'), aSavedBar:$('aSavedBar'), aLeftBar:$('aLeftBar'), aBoughtBar:$('aBoughtBar'), categoryProgress:$('categoryProgress'),
-  profileName:$('profileName'), profileAvatar:$('profileAvatar'), profileRole:$('profileRole'), nameSetting:$('nameSetting'), accountSetting:$('accountSetting'), saveName:$('saveName'), logoutButton:$('logoutButton'), mobileAdd:$('mobileAdd'),
+  profileName:$('profileName'), profileAvatar:$('profileAvatar'), profileRole:$('profileRole'), appVersionBadge:$('appVersionBadge'), profileAvatarPreview:$('profileAvatarPreview'), avatarFile:$('avatarFile'), chooseAvatar:$('chooseAvatar'), removeAvatar:$('removeAvatar'), avatarMessage:$('avatarMessage'), nameSetting:$('nameSetting'), accountSetting:$('accountSetting'), saveName:$('saveName'), logoutButton:$('logoutButton'), mobileAdd:$('mobileAdd'),
   openInstallGuide:$('openInstallGuide'), installGuideDialog:$('installGuideDialog'), installGuideClose:$('installGuideClose'), installGuideDone:$('installGuideDone'), installStatus:$('installStatus'), installNow:$('installNow'),
   editor:$('editorDialog'), editorForm:$('editorForm'), editorTitle:$('editorTitle'), editorClose:$('editorClose'), cancelEditor:$('cancelEditor'), deleteItem:$('deleteItem'),
   itemId:$('itemId'), urlInput:$('urlInput'), fetchPreview:$('fetchPreview'), fetchMessage:$('fetchMessage'), titleInput:$('titleInput'), priceInput:$('priceInput'), savedInput:$('savedInput'), categoryInput:$('categoryInput'), priorityInput:$('priorityInput'), statusInput:$('statusInput'), storeInput:$('storeInput'), variantInput:$('variantInput'), imageInput:$('imageInput'), noteInput:$('noteInput'),
@@ -58,6 +58,39 @@ const els = {
 
 function money(v){ return new Intl.NumberFormat('uk-UA',{maximumFractionDigits:0}).format(Number(v||0))+' ₴'; }
 function esc(v=''){ return String(v).replace(/[&<>'"]/g,c=>({ '&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#039;','"':'&quot;' }[c])); }
+
+function safeAvatarData(v=''){
+  const s=String(v||'').trim();
+  return /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/i.test(s) && s.length<600000 ? s : '';
+}
+function avatarInitial(u={}){return String(u.name||u.username||'?').trim().charAt(0).toUpperCase()||'?';}
+function setAvatarElement(el,u={}){
+  if(!el)return; const src=safeAvatarData(u.avatar);
+  el.classList.toggle('has-image',Boolean(src));
+  if(src) el.innerHTML=`<img src="${esc(src)}" alt="">`;
+  else el.textContent=avatarInitial(u);
+}
+function avatarHtml(u={},extra='small'){
+  const src=safeAvatarData(u.avatar); const cls=`avatar ${extra}`.trim();
+  return src?`<div class="${cls} has-image"><img src="${esc(src)}" alt=""></div>`:`<div class="${cls}">${esc(avatarInitial(u))}</div>`;
+}
+function imageFileToElement(file){
+  return new Promise((resolve,reject)=>{const url=URL.createObjectURL(file);const img=new Image();img.onload=()=>{URL.revokeObjectURL(url);resolve(img)};img.onerror=()=>{URL.revokeObjectURL(url);reject(new Error('Не удалось открыть изображение.'))};img.src=url;});
+}
+async function prepareAvatar(file){
+  if(!file||!['image/jpeg','image/png','image/webp'].includes(file.type)) throw new Error('Выбери JPG, PNG или WebP.');
+  if(file.size>10*1024*1024) throw new Error('Исходное фото слишком большое. Максимум 10 МБ.');
+  const img=await imageFileToElement(file); const maxSide=512; const scale=Math.min(1,maxSide/Math.max(img.naturalWidth||1,img.naturalHeight||1));
+  let w=Math.max(1,Math.round(img.naturalWidth*scale)),h=Math.max(1,Math.round(img.naturalHeight*scale));
+  const qualities=[.84,.76,.68,.60,.52];
+  for(const shrink of [1,.86,.74]){
+    const canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(w*shrink));canvas.height=Math.max(1,Math.round(h*shrink));
+    const ctx=canvas.getContext('2d');ctx.drawImage(img,0,0,canvas.width,canvas.height);
+    for(const q of qualities){const data=canvas.toDataURL('image/webp',q);const bytes=Math.ceil((data.length-data.indexOf(',')-1)*.75);if(bytes<=350*1024)return data;}
+  }
+  throw new Error('Не удалось достаточно уменьшить фото. Попробуй другое изображение.');
+}
+
 function validImageUrl(v=''){
   const s=String(v||'').trim();
   if(!s || /\[object(?:%20|\s)+Object\]/i.test(s)) return '';
@@ -165,8 +198,10 @@ function nextTheme(){
 }
 function updateProfile(){
   const u=state.me; if(!u)return;
-  els.profileName.textContent=u.name||u.username; els.profileAvatar.textContent=(u.name||u.username||'?').trim().charAt(0).toUpperCase();
+  els.profileName.textContent=u.name||u.username; setAvatarElement(els.profileAvatar,u); setAvatarElement(els.profileAvatarPreview,u);
   els.profileRole.textContent=u.role==='admin'?'администратор':'личный журнал'; els.nameSetting.value=u.name||''; els.accountSetting.value=`${u.username} · ${u.email}`;
+  if(els.appVersionBadge) els.appVersionBadge.textContent=`v${state.version||'1.2.3'}`;
+  els.removeAvatar?.classList.toggle('hidden',!safeAvatarData(u.avatar));
   els.adminNavItem.classList.toggle('hidden',u.role!=='admin'); els.adminSettingsCard.classList.toggle('hidden',u.role!=='admin');
 }
 
@@ -175,6 +210,7 @@ async function boot(){
   if(state.resetToken){ await openResetFromToken(); return; }
   if(state.inviteToken) await validateInvite();
   const me = await fetch('/api/me').then(r=>r.json()).catch(()=>({authenticated:false}));
+  state.version=me.version||state.version; if(els.appVersionBadge)els.appVersionBadge.textContent=`v${state.version}`;
   if(!me.authenticated){ showLogin(); return; }
   state.me=me.user; updateProfile(); showApp(); await loadItems();
   if(state.me?.role==='admin') await refreshAdminBadge();
@@ -370,7 +406,7 @@ function renderAdmin(){
 }
 function renderAdminUsers(){
   const q=(els.adminUserSearch?.value||'').trim().toLowerCase(); const users=state.admin.users.filter(u=>!q||[u.name,u.username,u.email].join(' ').toLowerCase().includes(q));
-  els.adminUsersList.innerHTML=users.map(u=>`<article class="admin-user-row"><div class="admin-person"><div class="avatar small">${esc((u.name||u.username||'?').charAt(0).toUpperCase())}</div><div><b>${esc(u.name)}</b><small>@${esc(u.username)} · ${esc(u.email)}</small></div></div><span class="role-chip ${u.role}">${roleLabel(u.role)}</span><span class="user-status ${u.status}">${statusLabel(u.status)}</span><div class="user-stats"><b>${u.itemCount||0}</b><small>товаров</small></div><div class="user-stats"><b>${money(u.totalSaved||0)}</b><small>накопил</small></div><small class="last-login">${u.lastLoginAt?`вход ${fmtDate(u.lastLoginAt)}`:'ещё не входил'}</small><div class="admin-user-actions">${u.id===state.me.id?'<span class="self-label">это ты</span>':`<button class="secondary mini" data-reset-user="${u.id}">Сброс</button><button class="secondary mini" data-toggle-user="${u.id}" data-next-status="${u.status==='blocked'?'active':'blocked'}">${u.status==='blocked'?'Разблокировать':'Блок'}</button><button class="danger-button mini" data-delete-user="${u.id}">Удалить</button>`}</div></article>`).join('');
+  els.adminUsersList.innerHTML=users.map(u=>`<article class="admin-user-row"><div class="admin-person">${avatarHtml(u)}<div><b>${esc(u.name)}</b><small>@${esc(u.username)} · ${esc(u.email)}</small></div></div><span class="role-chip ${u.role}">${roleLabel(u.role)}</span><span class="user-status ${u.status}">${statusLabel(u.status)}</span><div class="user-stats"><b>${u.itemCount||0}</b><small>товаров</small></div><div class="user-stats"><b>${money(u.totalSaved||0)}</b><small>накопил</small></div><small class="last-login">${u.lastLoginAt?`вход ${fmtDate(u.lastLoginAt)}`:'ещё не входил'}</small><div class="admin-user-actions">${u.id===state.me.id?'<span class="self-label">это ты</span>':`<button class="secondary mini" data-reset-user="${u.id}">Сброс</button><button class="secondary mini" data-toggle-user="${u.id}" data-next-status="${u.status==='blocked'?'active':'blocked'}">${u.status==='blocked'?'Разблокировать':'Блок'}</button><button class="danger-button mini" data-delete-user="${u.id}">Удалить</button>`}</div></article>`).join('');
   bindAdminActions();
 }
 function bindAdminActions(){
@@ -419,6 +455,13 @@ $$('[data-action="add"]').forEach(b=>b.onclick=()=>openEditor());
 $$('.nav-item,.mobile-nav-item').forEach(b=>b.onclick=()=>setView(b.dataset.view));
 $$('.theme-card').forEach(b=>b.onclick=()=>applyTheme(b.dataset.themeChoice));
 els.saveName.onclick=async()=>{try{const d=await api('/api/profile',{method:'PATCH',body:JSON.stringify({name:els.nameSetting.value.trim()})});state.me=d.user;updateProfile()}catch(err){alert(err.message)}};
+els.chooseAvatar.onclick=()=>els.avatarFile.click();
+els.avatarFile.onchange=async()=>{
+  const file=els.avatarFile.files?.[0]; if(!file)return; els.avatarMessage.textContent='Подготавливаю фото…'; els.chooseAvatar.disabled=true;
+  try{const avatar=await prepareAvatar(file);els.avatarMessage.textContent='Сохраняю…';const d=await api('/api/profile/avatar',{method:'PATCH',body:JSON.stringify({avatar})});state.me=d.user;updateProfile();els.avatarMessage.textContent='Аватар обновлён ✓';if(state.me?.role==='admin')loadAdmin().catch(()=>{});}catch(err){els.avatarMessage.textContent=err.message||'Не удалось загрузить аватар.';}finally{els.chooseAvatar.disabled=false;els.avatarFile.value='';}
+};
+els.removeAvatar.onclick=async()=>{if(!confirm('Удалить аватар профиля?'))return;els.avatarMessage.textContent='Удаляю…';try{const d=await api('/api/profile/avatar',{method:'PATCH',body:JSON.stringify({avatar:''})});state.me=d.user;updateProfile();els.avatarMessage.textContent='Аватар удалён.';if(state.me?.role==='admin')loadAdmin().catch(()=>{});}catch(err){els.avatarMessage.textContent=err.message||'Не удалось удалить аватар.';}};
+
 els.openInstallGuide.onclick=openInstallHelp;
 els.installGuideClose.onclick=els.installGuideDone.onclick=()=>els.installGuideDialog.close();
 $$('[data-install-tab]').forEach(b=>b.onclick=()=>selectInstallTab(b.dataset.installTab));
@@ -473,7 +516,7 @@ window.addEventListener('appinstalled',()=>{deferredInstallPrompt=null;updateIns
 if('serviceWorker' in navigator){
   window.addEventListener('load',async()=>{
     try{
-      const reg=await navigator.serviceWorker.register('/sw.js?v=1.2.2',{updateViaCache:'none'});
+      const reg=await navigator.serviceWorker.register('/sw.js?v=1.2.3',{updateViaCache:'none'});
       await reg.update();
     }catch{}
   });
