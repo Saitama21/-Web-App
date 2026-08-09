@@ -61,7 +61,7 @@ input,select,textarea{width:100%;border:1px solid var(--line);background:color-m
 }
 
 
-/* mobile admin dialogs / iPhone Safari */
+/* v1.1.3 — mobile admin dialogs / iPhone Safari */
 body:has(dialog[open]){overflow:hidden}
 
 /* Native <dialog> gets a fullscreen transparent top-layer shell.
