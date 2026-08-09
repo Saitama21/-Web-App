@@ -8,7 +8,7 @@ import { priceHistorySummary } from './lib/price-history.js';
 const { Pool } = pg;
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
-const VERSION = '1.2.1';
+const VERSION = '1.2.2';
 const DATABASE_URL = String(process.env.DATABASE_URL || '');
 const LEGACY_APP_PASSWORD = String(process.env.APP_PASSWORD || '');
 const ADMIN_EMAIL = normalizeEmail(process.env.ADMIN_EMAIL || 'admin@hochu.local');
@@ -577,11 +577,189 @@ function normalizeImage(value, baseUrl='', depth=0) {
   const v = cleanText(value);
   if (!v || v.startsWith('data:') || /\[object(?:%20|\s)+Object\]/i.test(v)) return '';
   try {
-    const u = new URL(v, baseUrl);
+    const u = baseUrl ? new URL(v, baseUrl) : new URL(v);
     if (!['http:','https:'].includes(u.protocol)) return '';
     return u.href;
   } catch { return ''; }
 }
+
+function imageUrlsFromValue(value, baseUrl='', depth=0, out=[]) {
+  if (depth > 8 || value === undefined || value === null || out.length >= 80) return out;
+  if (Array.isArray(value)) {
+    for (const entry of value) imageUrlsFromValue(entry, baseUrl, depth + 1, out);
+    return out;
+  }
+  if (typeof value === 'object') {
+    const preferredKeys = [
+      'original','base_action','big_tile','big','large','full','zoom','zoomImage','highRes','high_res',
+      'preview','medium','small','url','src','href','contentUrl','image','images','photo','photos','picture'
+    ];
+    const seenKeys=new Set();
+    for (const key of preferredKeys) {
+      if (Object.prototype.hasOwnProperty.call(value,key)) {
+        seenKeys.add(key); imageUrlsFromValue(value[key],baseUrl,depth+1,out);
+      }
+    }
+    for (const [key,nested] of Object.entries(value)) {
+      if (seenKeys.has(key)) continue;
+      if (nested && typeof nested === 'object') imageUrlsFromValue(nested,baseUrl,depth+1,out);
+    }
+    return out;
+  }
+  const url=normalizeImage(value,baseUrl);
+  if (url && !out.includes(url)) out.push(url);
+  return out;
+}
+function largestSrcsetUrl(srcset='', baseUrl='') {
+  const parts=String(srcset||'').split(',').map(x=>x.trim()).filter(Boolean);
+  let best='', bestWeight=-1;
+  for(const part of parts){
+    const m=part.match(/^(\S+)(?:\s+(\d+(?:\.\d+)?)(w|x))?$/i); if(!m) continue;
+    const url=normalizeImage(m[1],baseUrl); if(!url) continue;
+    const n=Number(m[2]||1); const weight=m[3]?.toLowerCase()==='w'?n:n*1000;
+    if(weight>bestWeight){bestWeight=weight;best=url;}
+  }
+  return best;
+}
+function productTitleWords(title='') {
+  return cleanText(title).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(x=>x.length>=3).slice(0,14);
+}
+function productImageNegative(text='') {
+  return /(?:banner|promo|advert|advertis|campaign|sale|discount|offer|gift|sprite|favicon|logo|icon|badge|avatar|payment|delivery|shipping|guarantee|warranty|newsletter|subscribe|social|header|footer|menu|nav|recommend|related|similar|accessor|recent|viewed|pixel|tracking|google|facebook|telegram|viber|акц(?:і|и)|зниж|скид|подар|реклам|баннер|банер|логотип|ікон|икон|достав|гарант|підпис|подпис|схож|похож|рекоменд|аксесуар)/i.test(String(text||''));
+}
+function productImagePositive(text='') {
+  return /(?:product|goods|item|detail|gallery|photo|image|picture|media|slider|swiper|slick|fotorama|zoom|thumb|preview|main|товар|галере|фото|зображ|изображ)/i.test(String(text||''));
+}
+function titleImageMatchScore(text='', title='') {
+  const hay=cleanText(text).toLowerCase(); if(!hay) return 0;
+  const words=productTitleWords(title); if(!words.length) return 0;
+  const hits=words.filter(w=>hay.includes(w)).length;
+  if(hits>=Math.min(4,words.length)) return 42;
+  if(hits>=2) return 26;
+  if(hits===1) return 8;
+  return 0;
+}
+function genericProductImageScore(candidate={}, title='') {
+  const url=normalizeImage(candidate.url||candidate.src||'',candidate.baseUrl||''); if(!url) return -999;
+  const identity=[url,candidate.alt,candidate.title,candidate.context,candidate.className,candidate.id,candidate.sourceType].filter(Boolean).join(' ');
+  let score=0;
+  if(candidate.fromJsonLd) score+=105;
+  if(candidate.fromEmbeddedJson) score+=82;
+  if(candidate.fromItemprop) score+=78;
+  if(candidate.fromGallery) score+=68;
+  if(candidate.fromProductScope) score+=58;
+  if(candidate.fromImageLink) score+=28;
+  if(candidate.fromOg) score+=16;
+  if(candidate.fromTwitter) score+=10;
+  if(candidate.fromMain) score+=8;
+  if(candidate.existing) score+=4;
+  if(productImagePositive(identity)) score+=18;
+  score+=titleImageMatchScore(`${candidate.alt||''} ${candidate.title||''} ${candidate.context||''}`,title);
+  if(productImageNegative(identity)) score-=115;
+  const w=Number(candidate.width||0),h=Number(candidate.height||0);
+  if(w&&h){
+    const ratio=w/h;
+    if(w<120||h<120) score-=90;
+    else if(w>=500&&h>=500) score+=12;
+    else if(w>=280&&h>=280) score+=6;
+    if(ratio>2.45||ratio<0.28) score-=95;
+  }
+  try {
+    const u=new URL(url);
+    if(/(?:\/icons?\/|\/logos?\/|sprite|favicon|placeholder|no[-_]?image)/i.test(u.pathname)) score-=100;
+  } catch {}
+  return score;
+}
+function rankGenericProductImages(candidates=[], title='', pageUrl='') {
+  const byUrl=new Map();
+  for(const raw of candidates){
+    const c=typeof raw==='string'?{url:raw}:raw||{};
+    const url=normalizeImage(c.url||c.src||'',pageUrl); if(!url) continue;
+    const merged={...(byUrl.get(url)||{}),...c,url,baseUrl:pageUrl};
+    // Preserve positive provenance when the same URL appears in several places.
+    for(const k of ['fromJsonLd','fromEmbeddedJson','fromItemprop','fromGallery','fromProductScope','fromImageLink','fromOg','fromTwitter','fromMain','existing']) merged[k]=Boolean((byUrl.get(url)||{})[k]||c[k]);
+    const prev=byUrl.get(url);
+    if(prev){ merged.context=`${prev.context||''} ${c.context||''}`.trim(); merged.alt=prev.alt||c.alt||''; merged.title=prev.title||c.title||''; }
+    byUrl.set(url,merged);
+  }
+  const ranked=[...byUrl.values()].map(c=>({...c,score:genericProductImageScore(c,title)})).filter(c=>c.score>-70);
+  ranked.sort((a,b)=>b.score-a.score);
+  return ranked;
+}
+function nodeImageUrls($, el, pageUrl='') {
+  const node=$(el); const out=[];
+  const attrs=['data-zoom-image','data-large-image','data-full','data-original','data-src','data-lazy-src','data-lazy','data-image','data-thumb','src'];
+  for(const a of attrs){ const u=normalizeImage(node.attr(a),pageUrl); if(u&&!out.includes(u)) out.push(u); }
+  const ss=largestSrcsetUrl(first(node.attr('srcset'),node.attr('data-srcset')),pageUrl); if(ss&&!out.includes(ss)) out.unshift(ss);
+  const parentHref=normalizeImage(node.closest('a').attr('href'),pageUrl);
+  if(parentHref&&/\.(?:avif|webp|jpe?g|png|gif)(?:[?#]|$)/i.test(parentHref)&&!out.includes(parentHref)) out.unshift(parentHref);
+  return out;
+}
+function collectGenericProductImageCandidates($, productJsonLd=null, pageUrl='', title='') {
+  const out=[]; const push=(url,meta={})=>{ const u=normalizeImage(url,pageUrl); if(u) out.push({url:u,...meta}); };
+  for(const u of imageUrlsFromValue(productJsonLd?.image,pageUrl)) push(u,{fromJsonLd:true,sourceType:'jsonld-product',alt:title});
+  for(const u of imageUrlsFromValue(first(productJsonLd?.photo,productJsonLd?.photos,productJsonLd?.images),pageUrl)) push(u,{fromJsonLd:true,sourceType:'jsonld-product',alt:title});
+  const metaSources=[
+    ['meta[property="og:image"]','content',{fromOg:true,sourceType:'og'}],
+    ['meta[property="og:image:secure_url"]','content',{fromOg:true,sourceType:'og'}],
+    ['meta[name="twitter:image"]','content',{fromTwitter:true,sourceType:'twitter'}],
+    ['link[rel="image_src"]','href',{sourceType:'image-src'}]
+  ];
+  for(const [sel,attr,meta] of metaSources) $(sel).each((_,el)=>push($(el).attr(attr),meta));
+  const imageNodes=$('img,source').slice(0,900);
+  imageNodes.each((_,el)=>{
+    const node=$(el); const parent=node.parent();
+    const scope=node.closest('[itemtype*="Product"], [itemscope][itemtype*="product"], [class*="product"], [id*="product"], [class*="goods"], [id*="goods"], main');
+    const ancestors=node.parents().slice(0,5);
+    const structural=[node.attr('class'),node.attr('id'),parent.attr('class'),parent.attr('id'),scope.attr('class'),scope.attr('id'),ancestors.map((_,a)=>`${$(a).attr('class')||''} ${$(a).attr('id')||''}`).get().join(' ')].filter(Boolean).join(' ');
+    const context=cleanText(`${node.attr('alt')||''} ${node.attr('title')||''} ${scope.find('h1,h2').first().text()||''} ${structural}`).slice(0,1800);
+    const fromItemprop=node.is('[itemprop="image"]')||Boolean(node.closest('[itemprop="image"]').length);
+    const fromGallery=/(?:gallery|slider|swiper|slick|fotorama|zoom|thumb|product[-_ ]?(?:photo|image|media)|goods[-_ ]?(?:photo|image|media))/i.test(structural);
+    const fromProductScope=Boolean(node.closest('[itemtype*="Product"], [itemscope][itemtype*="product"]').length)||/(?:product|goods|item)[-_ ]?(?:detail|card|view|page|media|image|photo)/i.test(structural);
+    const fromMain=Boolean(node.closest('main').length);
+    const width=Number(node.attr('width')||0),height=Number(node.attr('height')||0);
+    for(const u of nodeImageUrls($,el,pageUrl)) push(u,{alt:node.attr('alt')||'',title:node.attr('title')||'',context,className:structural,id:node.attr('id')||'',width,height,fromItemprop,fromGallery,fromProductScope,fromMain,fromImageLink:/\.(?:avif|webp|jpe?g|png|gif)(?:[?#]|$)/i.test(node.closest('a').attr('href')||''),sourceType:'dom'});
+  });
+  // Some shops expose zoom/original images only on anchors or data-* nodes without an <img>.
+  $('[data-zoom-image],[data-large-image],[data-original],[data-image],a[href]').slice(0,900).each((_,el)=>{
+    const node=$(el); const structural=`${node.attr('class')||''} ${node.attr('id')||''} ${node.parent().attr('class')||''}`;
+    if(!productImagePositive(structural)&&!node.closest('[itemtype*="Product"],[class*="product"],[id*="product"],[class*="gallery"],[class*="slider"],main').length) return;
+    const context=cleanText(`${node.attr('title')||''} ${node.attr('aria-label')||''} ${structural}`).slice(0,1200);
+    const vals=[node.attr('data-zoom-image'),node.attr('data-large-image'),node.attr('data-original'),node.attr('data-image'),node.attr('href')];
+    for(const v of vals){ const u=normalizeImage(v,pageUrl); if(u&&/\.(?:avif|webp|jpe?g|png|gif)(?:[?#]|$)/i.test(u)) push(u,{context,className:structural,fromGallery:productImagePositive(structural),fromProductScope:true,fromImageLink:true,sourceType:'dom-link'}); }
+  });
+  return rankGenericProductImages(out,title,pageUrl);
+}
+async function probeGenericImage(url='', pageUrl='') {
+  try {
+    const referer=(()=>{try{const u=new URL(pageUrl);return `${u.protocol}//${u.host}/`;}catch{return pageUrl;}})();
+    const r=await fetch(url,{headers:{'user-agent':'Mozilla/5.0','accept':'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8','range':'bytes=0-262143',referer},signal:AbortSignal.timeout(5500)});
+    if(!r.ok&&r.status!==206) return null;
+    const buf=Buffer.from(await r.arrayBuffer()); return imageDimensionsFromBuffer(buf);
+  } catch { return null; }
+}
+async function resolveGenericProductImage(result={}, pageUrl='') {
+  const ranked=rankGenericProductImages([
+    ...(result.imageCandidateDetails||[]),
+    ...(result.imageCandidates||[]).map(url=>({url})),
+    ...(result.image?[{url:result.image,existing:true}]:[])
+  ],result.title,pageUrl).slice(0,12);
+  if(!ranked.length) return result.image||'';
+  const checked=await Promise.all(ranked.slice(0,8).map(async c=>({...c,dims:await probeGenericImage(c.url,pageUrl)})));
+  let best=null,bestScore=-1e9;
+  for(const c of checked){
+    let score=c.score; const d=c.dims;
+    if(d){
+      const w=d.width||0,h=d.height||0,ratio=h?w/h:0;
+      if(w<150||h<150||ratio>2.45||ratio<0.28) score-=180;
+      else { score+=10; if(w>=500&&h>=500) score+=10; }
+    } else if(c.fromJsonLd||c.fromEmbeddedJson||c.fromItemprop||c.fromGallery) score+=3;
+    if(score>bestScore){bestScore=score;best=c;}
+  }
+  if(best&&bestScore>=-20) return best.url;
+  return ranked[0]?.url||result.image||'';
+}
+
 function domainInfo(rawUrl) {
   try {
     const u = new URL(rawUrl);
@@ -611,10 +789,22 @@ function usableTitle(title='') {
   return t.slice(0,250);
 }
 function mergeProduct(base={}, next={}) {
+  const imageCandidates=[...new Set([
+    ...(base.imageCandidates||[]),base.image,
+    ...(next.imageCandidates||[]),next.image
+  ].filter(Boolean))];
+  const imageCandidateDetails=[
+    ...(base.imageCandidateDetails||[]),
+    ...(base.image?[{url:base.image,existing:true,sourceType:'merged-base'}]:[]),
+    ...(next.imageCandidateDetails||[]),
+    ...(next.image?[{url:next.image,sourceType:'merged-next',fromEmbeddedJson:(next.source||[]).includes('embedded-json')}]:[])
+  ];
   return {
     ...base,
     title: usableTitle(base.title) || usableTitle(next.title),
     image: base.image || next.image || '',
+    imageCandidates,
+    imageCandidateDetails,
     price: numericPrice(base.price) || numericPrice(next.price),
     variant: cleanText(base.variant) || cleanText(next.variant) || '',
     canonicalUrl: base.canonicalUrl || next.canonicalUrl || '',
@@ -967,24 +1157,21 @@ function parseHtmlProduct(html, pageUrl) {
   const $ = cheerio.load(html);
   const p = findProductJsonLd($);
   const offer = p?.offers ? (Array.isArray(p.offers) ? p.offers[0] : p.offers) : null;
+  const title=usableTitle(first(
+    p?.name,
+    $('meta[property="og:title"]').attr('content'),
+    $('meta[name="twitter:title"]').attr('content'),
+    $('h1').first().text(),
+    $('[itemprop="name"]').first().text(),
+    $('.product-item__name,.product-title,.product__title,.product-name').first().text(),
+    $('title').text()
+  ));
+  const rankedImages=collectGenericProductImageCandidates($,p,pageUrl,title);
   let data = {
-    title: usableTitle(first(
-      p?.name,
-      $('meta[property="og:title"]').attr('content'),
-      $('meta[name="twitter:title"]').attr('content'),
-      $('h1').first().text(),
-      $('[itemprop="name"]').first().text(),
-      $('.product-item__name,.product-title,.product__title,.product-name').first().text(),
-      $('title').text()
-    )),
-    image: normalizeImage(first(
-      Array.isArray(p?.image) ? p.image[0] : p?.image,
-      $('meta[property="og:image"]').attr('content'),
-      $('meta[name="twitter:image"]').attr('content'),
-      $('[itemprop="image"]').first().attr('content'),
-      $('.product-item__img img,.product-slider img,.product__image img,.product-image img').first().attr('src'),
-      $('main img').first().attr('src')
-    ), pageUrl),
+    title,
+    image: rankedImages[0]?.url || '',
+    imageCandidates: rankedImages.map(x=>x.url).slice(0,20),
+    imageCandidateDetails: rankedImages.slice(0,20),
     price: numericPrice(first(
       offer?.price,
       $('meta[property="product:price:amount"]').attr('content'),
@@ -998,9 +1185,11 @@ function parseHtmlProduct(html, pageUrl) {
   };
   if (!data.price) data.price = parsePrice($('body').text().slice(0,240000));
 
-  // Modern shops often keep the real product object inside application JSON.
+  // Modern shops often keep the real Product object inside application JSON. Inspect it even when
+  // title/price were already found: the embedded object often contains the original gallery image.
+  let scriptsSeen=0;
   $('script').each((_, el) => {
-    if (qualityOf(data)==='complete') return;
+    if (++scriptsSeen > 140) return;
     const raw = $(el).contents().text().trim();
     if (!raw || raw.length > 3_000_000) return;
     let parsed = null;
@@ -1011,8 +1200,16 @@ function parseHtmlProduct(html, pageUrl) {
       const m = raw.match(/(?:__NEXT_DATA__|__NUXT__|productData|product)\s*=\s*({[\s\S]*?})\s*;?$/i);
       if (m) { try { parsed = JSON.parse(m[1]); } catch {} }
     }
-    if (parsed) data = mergeProduct(data, {...pickProductLike(parsed,pageUrl), source:['embedded-json']});
+    if (parsed) {
+      const picked=pickProductLike(parsed,pageUrl);
+      const embeddedImages=imageUrlsFromValue([picked.image,parsed?.image,parsed?.images,parsed?.photos],pageUrl).slice(0,12);
+      const next={...picked,source:['embedded-json'],imageCandidates:embeddedImages,imageCandidateDetails:embeddedImages.map(url=>({url,fromEmbeddedJson:true,sourceType:'embedded-json',alt:picked.title||title}))};
+      data = mergeProduct(data,next);
+    }
   });
+  // Re-rank after embedded JSON has contributed candidates.
+  const reranked=rankGenericProductImages([...(data.imageCandidateDetails||[]),...(data.imageCandidates||[]).map(url=>({url})),...(data.image?[{url:data.image}]:[])],data.title,pageUrl);
+  if(reranked.length){data.image=reranked[0].url;data.imageCandidates=reranked.map(x=>x.url).slice(0,20);data.imageCandidateDetails=reranked.slice(0,20);}
   return data;
 }
 function extractRozetkaGoodsId(url='') {
@@ -1250,6 +1447,10 @@ app.post('/api/product-preview', requireAuth, async (req, res) => {
 
   if (info.domain === 'makeup.com.ua') {
     result.image = await resolveMakeupProductImage(result, url);
+  } else {
+    // Universal image resolver: prefer Product/gallery semantics and validate actual dimensions.
+    // This is intentionally done after all fallbacks so a bad og:image/banner can be replaced.
+    result.image = await resolveGenericProductImage(result, url);
   }
 
   const quality = qualityOf(result);
@@ -1279,7 +1480,7 @@ app.post('/api/product-preview', requireAuth, async (req, res) => {
 
 app.get('*', (req, res) => res.sendFile(`${process.cwd()}/public/index.html`));
 
-export { parseMakeupReaderMarkdown, parseMakeupSearchHtml, parseMakeupSearchText, rankMakeupImages, makeupImageScore, priceHistorySummary };
+export { parseMakeupReaderMarkdown, parseMakeupSearchHtml, parseMakeupSearchText, rankMakeupImages, makeupImageScore, parseHtmlProduct, rankGenericProductImages, genericProductImageScore, imageDimensionsFromBuffer, priceHistorySummary };
 
 if (process.env.HOCHU_TEST !== '1') {
   initDb().then(() => {

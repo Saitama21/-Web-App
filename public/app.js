@@ -473,7 +473,7 @@ window.addEventListener('appinstalled',()=>{deferredInstallPrompt=null;updateIns
 if('serviceWorker' in navigator){
   window.addEventListener('load',async()=>{
     try{
-      const reg=await navigator.serviceWorker.register('/sw.js?v=1.2.1',{updateViaCache:'none'});
+      const reg=await navigator.serviceWorker.register('/sw.js?v=1.2.2',{updateViaCache:'none'});
       await reg.update();
     }catch{}
   });
