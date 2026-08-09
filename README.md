@@ -1,4 +1,16 @@
-# Хочу — Web App v1.0.0
+# Хочу — Web App v1.0.1
+
+## Что исправлено в v1.0.1
+- Rozetka: отдельный fallback через публичный product API по ID товара.
+- Makeup и другие JS/anti-bot магазины: расширенный HTML/JSON разбор + резервный Reader/Microlink fallback.
+- Больше не показываем пользователю сырой HTTP 403.
+- Успех считается только если реально получены полезные данные.
+- Сообщения: полный / частичный / ручной режим.
+- Автокатегории: Makeup → Красота, Converse → Одежда и обувь, ALLO/COMFY/Фокстрот → Техника.
+- Магазин и категория определяются уже при вставке ссылки.
+- Кнопка «Подтянуть» после успешного чтения превращается в «Обновить».
+- Обновлён service worker cache, чтобы браузер не держал старый frontend.
+
 
 Личный журнал желаний, покупок и накоплений. Сборка подготовлена для GitHub + Railway.
 
@@ -66,7 +78,7 @@ https://ТВОЙ-ДОМЕН.up.railway.app/api/health
 {
   "ok": true,
   "app": "Хочу",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "database": "postgresql"
 }
 ```
@@ -80,7 +92,7 @@ https://ТВОЙ-ДОМЕН.up.railway.app/api/health
 ## Структура
 
 ```text
-hochu-webapp-v1.0.0/
+hochu-webapp-v1.0.1/
 ├─ server.js
 ├─ package.json
 ├─ railway.json

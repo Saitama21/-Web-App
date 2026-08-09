@@ -7,7 +7,7 @@ import * as cheerio from 'cheerio';
 const { Pool } = pg;
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
-const VERSION = '1.0.0';
+const VERSION = '1.0.1';
 const APP_PASSWORD = String(process.env.APP_PASSWORD || '');
 const SESSION_SECRET = String(process.env.SESSION_SECRET || APP_PASSWORD || 'local-dev-secret');
 const DATABASE_URL = String(process.env.DATABASE_URL || '');
@@ -218,12 +218,58 @@ function findProductJsonLd($) {
   }
   return null;
 }
+
+const STORE_CONFIG = {
+  'rozetka.com.ua': { name: 'Rozetka', category: null },
+  'makeup.com.ua': { name: 'Makeup', category: 'Красота' },
+  'converse.org.ua': { name: 'Converse', category: 'Одежда и обувь' },
+  'allo.ua': { name: 'ALLO', category: 'Техника' },
+  'comfy.ua': { name: 'COMFY', category: 'Техника' },
+  'foxtrot.com.ua': { name: 'Фокстрот', category: 'Техника' },
+  'epicentrk.ua': { name: 'Епіцентр', category: null }
+};
+
 function first(...vals) { return vals.find(v => v !== undefined && v !== null && String(v).trim() !== ''); }
+function cleanText(v) { return String(v ?? '').replace(/\s+/g, ' ').trim(); }
+function numericPrice(v) {
+  if (v === undefined || v === null || v === '') return null;
+  if (typeof v === 'number') return Number.isFinite(v) && v > 0 ? v : null;
+  const s = String(v).replace(/\u00a0/g,' ').replace(/[^\d.,\s]/g,'').trim();
+  if (!s) return null;
+  let n = s.replace(/\s/g,'');
+  if (n.includes(',') && n.includes('.')) {
+    n = n.lastIndexOf(',') > n.lastIndexOf('.') ? n.replace(/\./g,'').replace(',','.') : n.replace(/,/g,'');
+  } else n = n.replace(',','.');
+  const parsed = Number(n);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
 function parsePrice(text) {
-  const m = String(text || '').replace(/\u00a0/g,' ').match(/(\d[\d\s.,]{1,18})\s*(₴|грн|UAH|uah)/);
-  if (!m) return null;
-  const n = Number(m[1].replace(/\s/g,'').replace(',','.'));
-  return Number.isFinite(n) ? n : null;
+  const s = String(text || '').replace(/\u00a0/g,' ');
+  const patterns = [
+    /(\d[\d\s.,]{1,18})\s*(?:₴|грн|UAH|uah)/,
+    /(?:ціна|цена|price)\s*[:\-]?\s*(\d[\d\s.,]{1,18})/i
+  ];
+  for (const rx of patterns) {
+    const m = s.match(rx); if (!m) continue;
+    const n = numericPrice(m[1]); if (n) return n;
+  }
+  return null;
+}
+function normalizeImage(value, baseUrl='') {
+  let v = value;
+  if (Array.isArray(v)) v = v[0];
+  if (v && typeof v === 'object') v = first(v.url, v.original, v.src, v.contentUrl, v.image);
+  v = cleanText(v);
+  if (!v || v.startsWith('data:')) return '';
+  try { return new URL(v, baseUrl).href; } catch { return ''; }
+}
+function domainInfo(rawUrl) {
+  try {
+    const u = new URL(rawUrl);
+    const domain = u.hostname.toLowerCase().replace(/^www\./,'');
+    const cfg = STORE_CONFIG[domain];
+    return { domain, store: cfg?.name || domain.split('.')[0].replace(/^./, c => c.toUpperCase()), category: cfg?.category || null };
+  } catch { return { domain:'', store:'Магазин', category:null }; }
 }
 function isAllowedUrl(raw) {
   try {
@@ -234,43 +280,231 @@ function isAllowedUrl(raw) {
     return true;
   } catch { return false; }
 }
+function looksLikeChallenge(html='') {
+  const s = String(html).toLowerCase();
+  return s.includes('verify that you') || s.includes('not a robot') || s.includes('enable javascript') ||
+    s.includes('access denied') || s.includes('captcha') || s.includes('cf-chl-') || s.includes('cloudflare');
+}
+function usableTitle(title='') {
+  const t = cleanText(title);
+  if (t.length < 3) return '';
+  if (/javascript is disabled|access denied|just a moment|makeup\s*[-–—]\s*(інтернет|интернет)/i.test(t)) return '';
+  return t.slice(0,250);
+}
+function mergeProduct(base={}, next={}) {
+  return {
+    ...base,
+    title: usableTitle(base.title) || usableTitle(next.title),
+    image: base.image || next.image || '',
+    price: numericPrice(base.price) || numericPrice(next.price),
+    canonicalUrl: base.canonicalUrl || next.canonicalUrl || '',
+    source: [...new Set([...(base.source||[]), ...(next.source||[])])]
+  };
+}
+function qualityOf(data={}) {
+  const title = Boolean(usableTitle(data.title));
+  const price = Boolean(numericPrice(data.price));
+  const image = Boolean(data.image);
+  if (title && (price || image)) return 'complete';
+  if (title || price || image) return 'partial';
+  return 'none';
+}
+function pickProductLike(root, baseUrl='') {
+  if (!root || typeof root !== 'object') return {};
+  const queue = [root];
+  let best = {}, bestScore = -1, seen = 0;
+  while (queue.length && seen++ < 8000) {
+    const x = queue.shift();
+    if (!x || typeof x !== 'object') continue;
+    if (Array.isArray(x)) { queue.push(...x.slice(0,100)); continue; }
+    const title = usableTitle(first(x.title, x.name, x.productName, x.goods_name, x.goodsName));
+    const price = numericPrice(first(x.price, x.currentPrice, x.salePrice, x.price_value, x.finalPrice, x.priceFormatted));
+    const image = normalizeImage(first(x.image, x.images, x.photo, x.photos, x.imageUrl, x.mainImage, x.picture), baseUrl);
+    const score = (title?3:0)+(price?3:0)+(image?2:0)+(x['@type']==='Product'?3:0);
+    if (score > bestScore) { bestScore=score; best={ title, price, image }; }
+    for (const v of Object.values(x)) if (v && typeof v === 'object') queue.push(v);
+  }
+  return bestScore > 0 ? best : {};
+}
+function parseHtmlProduct(html, pageUrl) {
+  const $ = cheerio.load(html);
+  const p = findProductJsonLd($);
+  const offer = p?.offers ? (Array.isArray(p.offers) ? p.offers[0] : p.offers) : null;
+  let data = {
+    title: usableTitle(first(
+      p?.name,
+      $('meta[property="og:title"]').attr('content'),
+      $('meta[name="twitter:title"]').attr('content'),
+      $('h1').first().text(),
+      $('[itemprop="name"]').first().text(),
+      $('.product-item__name,.product-title,.product__title,.product-name').first().text(),
+      $('title').text()
+    )),
+    image: normalizeImage(first(
+      Array.isArray(p?.image) ? p.image[0] : p?.image,
+      $('meta[property="og:image"]').attr('content'),
+      $('meta[name="twitter:image"]').attr('content'),
+      $('[itemprop="image"]').first().attr('content'),
+      $('.product-item__img img,.product-slider img,.product__image img,.product-image img').first().attr('src'),
+      $('main img').first().attr('src')
+    ), pageUrl),
+    price: numericPrice(first(
+      offer?.price,
+      offer?.lowPrice,
+      $('meta[property="product:price:amount"]').attr('content'),
+      $('[itemprop="price"]').first().attr('content'),
+      $('[itemprop="price"]').first().text(),
+      $('[data-price]').first().attr('data-price'),
+      $('.product-item__price,.product-price,.product__price,.price').first().text()
+    )),
+    canonicalUrl: first($('link[rel="canonical"]').attr('href'), pageUrl),
+    source: ['html']
+  };
+  if (!data.price) data.price = parsePrice($('body').text().slice(0,240000));
+
+  // Modern shops often keep the real product object inside application JSON.
+  $('script').each((_, el) => {
+    if (qualityOf(data)==='complete') return;
+    const raw = $(el).contents().text().trim();
+    if (!raw || raw.length > 3_000_000) return;
+    let parsed = null;
+    if (raw.startsWith('{') || raw.startsWith('[')) {
+      try { parsed = JSON.parse(raw); } catch {}
+    }
+    if (!parsed) {
+      const m = raw.match(/(?:__NEXT_DATA__|__NUXT__|productData|product)\s*=\s*({[\s\S]*?})\s*;?$/i);
+      if (m) { try { parsed = JSON.parse(m[1]); } catch {} }
+    }
+    if (parsed) data = mergeProduct(data, {...pickProductLike(parsed,pageUrl), source:['embedded-json']});
+  });
+  return data;
+}
+function extractRozetkaGoodsId(url='') {
+  const m = String(url).match(/\/p(\d{5,})\/?(?:[?#].*)?$/i) || String(url).match(/\/(\d{5,})\/p\1\/?/i);
+  return m ? m[1] : '';
+}
+async function fetchJson(url, headers={}) {
+  const r = await fetch(url,{headers:{'user-agent':'Mozilla/5.0','accept':'application/json,text/plain,*/*',...headers},signal:AbortSignal.timeout(12000)});
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return await r.json();
+}
+async function rozetkaApiFallback(productUrl) {
+  const id = extractRozetkaGoodsId(productUrl);
+  if (!id) return {};
+  const endpoints = [
+    `https://rozetka.com.ua/api/product-api/v4/goods/get-main?front-type=xl&country=UA&lang=ua&goodsId=${id}`,
+    `https://product-api.rozetka.com.ua/v4/goods/get-main?front-type=xl&country=UA&lang=ua&goodsId=${id}`,
+    `https://product-api.rozetka.company/v4/goods/get-main?front-type=xl&country=UA&lang=ua&goodsId=${id}`
+  ];
+  for (const endpoint of endpoints) {
+    try {
+      const json = await fetchJson(endpoint, { referer:'https://rozetka.com.ua/' });
+      const root = json?.data || json;
+      const best = pickProductLike(root, productUrl);
+      // Known Rozetka response keys get priority.
+      const schema = root?.seo?.schema || root?.schema || root?.seo?.schema_org || {};
+      const productSchema = schema?.Product || schema?.product || schema;
+      const result = mergeProduct({
+        title: usableTitle(first(root?.title, root?.name, productSchema?.name)),
+        price: numericPrice(first(root?.price, root?.price_value, root?.price_pcs, productSchema?.offers?.price)),
+        image: normalizeImage(first(root?.images, root?.image, root?.photo, root?.photo_preview, productSchema?.image), productUrl),
+        canonicalUrl: productUrl,
+        source:['rozetka-api']
+      }, {...best, source:['rozetka-api-scan']});
+      if (qualityOf(result)!=='none') return result;
+    } catch {}
+  }
+  return {};
+}
+function parseReaderMarkdown(text, pageUrl) {
+  const s = String(text || '');
+  const heading = s.match(/^#\s+(.+)$/m)?.[1] || s.match(/^Title:\s*(.+)$/mi)?.[1] || '';
+  const image = s.match(/!\[[^\]]*\]\((https?:\/\/[^)\s]+)\)/)?.[1] || '';
+  return { title: usableTitle(heading), price: parsePrice(s.slice(0,220000)), image: normalizeImage(image,pageUrl), canonicalUrl:pageUrl, source:['reader'] };
+}
+async function readerFallback(productUrl) {
+  try {
+    const proxy = `https://r.jina.ai/${productUrl}`;
+    const r = await fetch(proxy,{headers:{'user-agent':'Mozilla/5.0','accept':'text/plain'},signal:AbortSignal.timeout(18000)});
+    if (!r.ok) return {};
+    return parseReaderMarkdown(await r.text(), productUrl);
+  } catch { return {}; }
+}
+async function microlinkFallback(productUrl) {
+  try {
+    const endpoint = `https://api.microlink.io/?url=${encodeURIComponent(productUrl)}`;
+    const r = await fetch(endpoint,{headers:{'user-agent':'Mozilla/5.0','accept':'application/json'},signal:AbortSignal.timeout(16000)});
+    if (!r.ok) return {};
+    const j = await r.json(); const d=j?.data||{};
+    return { title:usableTitle(d.title), image:normalizeImage(d.image?.url||d.image,productUrl), price:null, canonicalUrl:d.url||productUrl, source:['microlink'] };
+  } catch { return {}; }
+}
+function inferCategoryFromTitle(title='', domain='') {
+  if (STORE_CONFIG[domain]?.category) return STORE_CONFIG[domain].category;
+  // Rozetka is a marketplace: infer only when the title is obvious.
+  const t = String(title).toLowerCase();
+  if (/iphone|macbook|ноутбук|смартфон|телефон|навушник|наушник|зарядн|bluetti|power station|камера|фотоапарат|телевізор|телевизор/.test(t)) return 'Техника';
+  if (/кросів|кроссов|черевик|ботин|converse|одяг|одежд|футболк|куртк/.test(t)) return 'Одежда и обувь';
+  if (/парфум|духи|космет|крем|шампун|помад|туш|makeup/.test(t)) return 'Красота';
+  return null;
+}
+
 app.post('/api/product-preview', requireAuth, async (req, res) => {
   const url = String(req.body?.url || '').trim();
   if (!isAllowedUrl(url)) return res.status(400).json({ error: 'Некорректная или локальная ссылка.' });
-  try {
-    const r = await fetch(url, {
-      redirect: 'follow',
-      headers: {
-        'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/150 Safari/537.36',
-        'accept-language': 'uk-UA,uk;q=0.9,ru;q=0.8,en;q=0.7',
-        accept: 'text/html,application/xhtml+xml'
-      },
-      signal: AbortSignal.timeout(15000)
-    });
-    if (!r.ok) return res.status(502).json({ error: `Магазин ответил HTTP ${r.status}. Заполни карточку вручную.` });
-    const html = await r.text();
-    const $ = cheerio.load(html);
-    const p = findProductJsonLd($);
-    const offer = p?.offers ? (Array.isArray(p.offers) ? p.offers[0] : p.offers) : null;
-    let title = first(p?.name, $('meta[property="og:title"]').attr('content'), $('meta[name="twitter:title"]').attr('content'), $('title').text()) || '';
-    let image = first(Array.isArray(p?.image) ? p.image[0] : p?.image, $('meta[property="og:image"]').attr('content'), $('meta[name="twitter:image"]').attr('content')) || '';
-    let price = first(offer?.price, offer?.lowPrice, $('meta[property="product:price:amount"]').attr('content'), $('[itemprop="price"]').first().attr('content'));
-    price = price != null ? Number(String(price).replace(/\s/g,'').replace(',','.')) : null;
-    if (!Number.isFinite(price)) price = parsePrice($('body').text().slice(0,180000));
-    try { if (image) image = new URL(image, r.url).href; } catch {}
-    const finalUrl = new URL(r.url);
-    const storeDomain = finalUrl.hostname.replace(/^www\./,'');
-    const store = ({
-      'rozetka.com.ua':'Rozetka','makeup.com.ua':'Makeup','converse.org.ua':'Converse',
-      'allo.ua':'ALLO','comfy.ua':'COMFY','foxtrot.com.ua':'Фокстрот','epicentrk.ua':'Епіцентр'
-    })[storeDomain] || storeDomain.split('.')[0].replace(/^./, c => c.toUpperCase());
-    res.json({
-      title: String(title).trim().replace(/\s+/g,' ').slice(0,250), image,
-      price: Number.isFinite(price) ? price : null, store, storeDomain, canonicalUrl: r.url
-    });
-  } catch {
-    res.status(502).json({ error: 'Не удалось прочитать страницу. Некоторые магазины блокируют автоматический разбор — заполни данные вручную.' });
+
+  const info = domainInfo(url);
+  let result = { title:'', image:'', price:null, canonicalUrl:url, source:[] };
+  let directStatus = null;
+
+  // Rozetka's public product endpoint is considerably more reliable than loading the storefront page from Railway.
+  if (info.domain === 'rozetka.com.ua') result = mergeProduct(result, await rozetkaApiFallback(url));
+
+  if (qualityOf(result) !== 'complete') {
+    try {
+      const r = await fetch(url, {
+        redirect: 'follow',
+        headers: {
+          'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150 Safari/537.36',
+          'accept-language': 'uk-UA,uk;q=0.9,ru;q=0.8,en;q=0.7',
+          accept: 'text/html,application/xhtml+xml',
+          'cache-control':'no-cache',
+          pragma:'no-cache'
+        },
+        signal: AbortSignal.timeout(15000)
+      });
+      directStatus = r.status;
+      if (r.ok) {
+        const html = await r.text();
+        if (!looksLikeChallenge(html)) result = mergeProduct(result, parseHtmlProduct(html, r.url));
+      }
+    } catch {}
   }
+
+  // Anti-bot / JS challenge fallback. No API key is required; if unavailable we simply continue to manual mode.
+  if (qualityOf(result) !== 'complete') result = mergeProduct(result, await readerFallback(url));
+  if (qualityOf(result) !== 'complete') result = mergeProduct(result, await microlinkFallback(url));
+
+  const quality = qualityOf(result);
+  const category = inferCategoryFromTitle(result.title, info.domain);
+  let message;
+  if (quality === 'complete') message = 'Готово. Проверь данные перед сохранением.';
+  else if (quality === 'partial') message = 'Получены не все данные — проверь и при необходимости дополни поля.';
+  else message = 'Магазин не дал прочитать карточку автоматически. Ссылка сохранена — заполни недостающие поля вручную.';
+
+  res.json({
+    title: usableTitle(result.title),
+    image: result.image || '',
+    price: numericPrice(result.price),
+    store: info.store,
+    storeDomain: info.domain,
+    category,
+    canonicalUrl: result.canonicalUrl || url,
+    quality,
+    message,
+    blocked: directStatus === 403 || directStatus === 429,
+    sources: result.source || []
+  });
 });
 
 app.get('*', (req, res) => res.sendFile(`${process.cwd()}/public/index.html`));

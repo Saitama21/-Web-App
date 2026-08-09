@@ -1,6 +1,6 @@
 {
   "name": "hochu-wishlist-webapp",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "engines": { "node": ">=20" },
@@ -10,7 +10,7 @@
     "check": "node --check server.js && node --check public/app.js"
   },
   "dependencies": {
-    "cheerio": "^1.0.0",
+    "cheerio": "^1.0.1",
     "cookie-parser": "^1.4.7",
     "express": "^4.21.2",
     "pg": "^8.13.1"

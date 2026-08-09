@@ -14,6 +14,16 @@ const STORE_NAMES = {
   'rozetka.com.ua':'Rozetka','makeup.com.ua':'Makeup','converse.org.ua':'Converse','allo.ua':'ALLO',
   'comfy.ua':'COMFY','foxtrot.com.ua':'Фокстрот','epicentrk.ua':'Епіцентр'
 };
+const STORE_DEFAULT_CATEGORY = {
+  'makeup.com.ua':'Красота','converse.org.ua':'Одежда и обувь','allo.ua':'Техника',
+  'comfy.ua':'Техника','foxtrot.com.ua':'Техника'
+};
+function applyStoreFromUrl(){
+  const d=getDomain(els.urlInput.value.trim()); if(!d) return;
+  if(STORE_NAMES[d]) els.storeInput.value=STORE_NAMES[d];
+  if(STORE_DEFAULT_CATEGORY[d] && (!els.itemId.value || els.categoryInput.value==='Техника' || els.categoryInput.value==='Другое')) els.categoryInput.value=STORE_DEFAULT_CATEGORY[d];
+  updatePreview();
+}
 
 const state = {
   items: [], view: 'home', homeStatus: 'all', theme: localStorage.getItem('hochu-theme') || 'system',
@@ -173,7 +183,7 @@ function renderStats(){
 }
 
 function resetEditor(){
-  els.editorForm.reset(); els.itemId.value=''; els.fetchMessage.textContent=''; els.deleteItem.classList.add('hidden'); els.editorTitle.textContent='Новое желание'; els.priorityInput.value='2'; els.statusInput.value='want'; els.categoryInput.value='Техника'; updatePreview();
+  els.editorForm.reset(); els.itemId.value=''; els.fetchMessage.textContent=''; els.fetchPreview.textContent='✦ Подтянуть'; els.deleteItem.classList.add('hidden'); els.editorTitle.textContent='Новое желание'; els.priorityInput.value='2'; els.statusInput.value='want'; els.categoryInput.value='Техника'; updatePreview();
 }
 function openEditor(id=null){
   resetEditor();
@@ -204,7 +214,28 @@ $$('#homeTabs .tab').forEach(b=>b.onclick=()=>{state.homeStatus=b.dataset.status
 
 els.editorClose.onclick=()=>els.editor.close(); els.cancelEditor.onclick=()=>els.editor.close();
 [els.titleInput,els.priceInput,els.savedInput,els.storeInput,els.imageInput].forEach(el=>el.addEventListener('input',updatePreview));
-els.fetchPreview.onclick=async()=>{const url=els.urlInput.value.trim();if(!url){els.fetchMessage.textContent='Сначала вставь ссылку.';return}els.fetchPreview.disabled=true;els.fetchMessage.textContent='Читаю страницу товара…';try{const d=await api('/api/product-preview',{method:'POST',body:JSON.stringify({url})});if(d.title)els.titleInput.value=d.title;if(d.price)els.priceInput.value=d.price;if(d.store)els.storeInput.value=d.store;if(d.image)els.imageInput.value=d.image;if(d.canonicalUrl)els.urlInput.value=d.canonicalUrl;els.fetchMessage.textContent='Готово. Проверь данные перед сохранением.';updatePreview()}catch(err){els.fetchMessage.textContent=err.message}finally{els.fetchPreview.disabled=false}};
+els.urlInput.addEventListener('input',applyStoreFromUrl);
+els.urlInput.addEventListener('paste',()=>setTimeout(applyStoreFromUrl,0));
+els.fetchPreview.onclick=async()=>{
+  const url=els.urlInput.value.trim();
+  if(!url){els.fetchMessage.textContent='Сначала вставь ссылку.';return}
+  applyStoreFromUrl();
+  els.fetchPreview.disabled=true; els.fetchMessage.textContent='Читаю карточку товара…';
+  try{
+    const d=await api('/api/product-preview',{method:'POST',body:JSON.stringify({url})});
+    if(d.title) els.titleInput.value=d.title;
+    if(d.price) els.priceInput.value=d.price;
+    if(d.store) els.storeInput.value=d.store;
+    if(d.image) els.imageInput.value=d.image;
+    if(d.category) els.categoryInput.value=d.category;
+    if(d.canonicalUrl) els.urlInput.value=d.canonicalUrl;
+    els.fetchMessage.textContent=d.message || (d.quality==='partial'?'Получены не все данные — проверь поля.':d.quality==='none'?'Не удалось получить данные автоматически. Заполни поля вручную.':'Готово. Проверь данные перед сохранением.');
+    els.fetchPreview.textContent=d.quality==='none'?'✦ Подтянуть':'↻ Обновить';
+    updatePreview();
+  }catch(err){
+    els.fetchMessage.textContent='Не удалось получить данные автоматически. Ссылка останется в карточке — заполни поля вручную.';
+  }finally{els.fetchPreview.disabled=false}
+};
 els.editorForm.addEventListener('submit',async e=>{e.preventDefault();const payload=itemPayload();try{if(els.itemId.value)await api(`/api/items/${els.itemId.value}`,{method:'PUT',body:JSON.stringify(payload)});else await api('/api/items',{method:'POST',body:JSON.stringify(payload)});els.editor.close();await loadItems()}catch(err){alert(err.message)}});
 els.deleteItem.onclick=async()=>{if(!els.itemId.value||!confirm('Удалить эту покупку из журнала?'))return;try{await api(`/api/items/${els.itemId.value}`,{method:'DELETE'});els.editor.close();await loadItems()}catch(err){alert(err.message)}};
 
