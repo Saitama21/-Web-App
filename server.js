@@ -7,10 +7,16 @@ import * as cheerio from 'cheerio';
 const { Pool } = pg;
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
-const VERSION = '1.0.1';
-const APP_PASSWORD = String(process.env.APP_PASSWORD || '');
-const SESSION_SECRET = String(process.env.SESSION_SECRET || APP_PASSWORD || 'local-dev-secret');
+const VERSION = '1.1.0';
 const DATABASE_URL = String(process.env.DATABASE_URL || '');
+const LEGACY_APP_PASSWORD = String(process.env.APP_PASSWORD || '');
+const ADMIN_EMAIL = normalizeEmail(process.env.ADMIN_EMAIL || 'admin@hochu.local');
+const ADMIN_USERNAME = normalizeUsername(process.env.ADMIN_USERNAME || 'admin');
+const ADMIN_NAME = cleanShort(process.env.ADMIN_NAME || 'Иван', 80) || 'Иван';
+const ADMIN_PASSWORD = String(process.env.ADMIN_PASSWORD || LEGACY_APP_PASSWORD || '');
+const COOKIE_NAME = 'hochu_session';
+const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 30;
+const RESET_TTL_MS = 1000 * 60 * 30;
 
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '1mb' }));
@@ -19,45 +25,154 @@ app.use(express.static('public', { extensions: ['html'], maxAge: process.env.NOD
 
 const pool = DATABASE_URL ? new Pool({
   connectionString: DATABASE_URL,
-  ssl: /localhost|127\.0\.0\.1/.test(DATABASE_URL) ? false : { rejectUnauthorized: false }
+  ssl: /localhost|127\\.0\\.0\\.1/.test(DATABASE_URL) ? false : { rejectUnauthorized: false }
 }) : null;
 
-// Local development fallback. Railway should use PostgreSQL.
-const memory = [];
+// In-memory fallback keeps local development/test mode working without PostgreSQL.
+const mem = {
+  users: [], sessions: new Map(), items: [], accessRequests: [], resetRequests: [], resetTokens: [], invitations: [], audit: []
+};
 
-function sign(payload) {
-  return crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
+function cleanShort(value='', max=120) { return String(value ?? '').replace(/\\s+/g, ' ').trim().slice(0,max); }
+function normalizeEmail(value='') { return String(value ?? '').trim().toLowerCase().slice(0,254); }
+function normalizeUsername(value='') { return String(value ?? '').trim().toLowerCase().replace(/\s+/g,'').slice(0,40); }
+function validEmail(value='') { return /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(normalizeEmail(value)); }
+function validUsername(value='') { return /^[\p{L}\p{N}][\p{L}\p{N}._-]{2,39}$/u.test(normalizeUsername(value)); }
+function tokenHash(token='') { return crypto.createHash('sha256').update(String(token)).digest('hex'); }
+
+function scryptAsync(password,salt,keylen=64){ return new Promise((resolve,reject)=>crypto.scrypt(password,salt,keylen,(err,key)=>err?reject(err):resolve(key))); }
+async function hashPassword(password){ const salt=crypto.randomBytes(16).toString('hex'); const key=await scryptAsync(String(password),salt); return `scrypt$${salt}$${key.toString('hex')}`; }
+async function verifyPassword(password,stored=''){ try{ const [kind,salt,hex]=String(stored).split('$'); if(kind!=='scrypt'||!salt||!hex)return false; const key=await scryptAsync(String(password),salt,Buffer.from(hex,'hex').length); const expected=Buffer.from(hex,'hex'); return key.length===expected.length&&crypto.timingSafeEqual(key,expected);}catch{return false;} }
+function newRawToken(bytes=32) { return crypto.randomBytes(bytes).toString('base64url'); }
+function cookieOptions(maxAge=SESSION_TTL_MS) {
+  return { httpOnly:true, sameSite:'lax', secure:Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.NODE_ENV==='production'), maxAge, path:'/' };
 }
-function newSession() {
-  const raw = `hochu:${Date.now()}:${crypto.randomBytes(12).toString('hex')}`;
-  return `${Buffer.from(raw).toString('base64url')}.${sign(raw)}`;
+function safeUser(u) {
+  if (!u) return null;
+  return { id:u.id, name:u.name, username:u.username, email:u.email, role:u.role, status:u.status, createdAt:u.created_at||u.createdAt, lastLoginAt:u.last_login_at||u.lastLoginAt };
 }
-function sessionValid(token) {
+function appOrigin(req) { return `${req.protocol}://${req.get('host')}`; }
+
+// Basic same-origin guard for browser mutations. SameSite cookies remain the main CSRF boundary.
+app.use('/api', (req,res,next) => {
+  if (!['POST','PUT','PATCH','DELETE'].includes(req.method)) return next();
+  const origin = req.get('origin');
+  if (!origin) return next();
+  try { if (new URL(origin).host !== req.get('host')) return res.status(403).json({error:'Недопустимый источник запроса.'}); }
+  catch { return res.status(403).json({error:'Недопустимый источник запроса.'}); }
+  next();
+});
+
+const rate = new Map();
+function rateLimit(bucket, max=12, windowMs=60_000) {
+  return (req,res,next) => {
+    const key=`${bucket}:${req.ip}`; const now=Date.now();
+    let v=rate.get(key); if(!v || now-v.start>windowMs) v={start:now,count:0}; v.count++; rate.set(key,v);
+    if(v.count>max) return res.status(429).json({error:'Слишком много попыток. Попробуй чуть позже.'});
+    next();
+  };
+}
+
+async function audit(actorUserId, action, targetUserId=null, details={}) {
   try {
-    const [encoded, signature] = String(token || '').split('.');
-    if (!encoded || !signature) return false;
-    const raw = Buffer.from(encoded, 'base64url').toString('utf8');
-    const expected = sign(raw);
-    if (signature.length !== expected.length) return false;
-    return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
-  } catch { return false; }
-}
-function requireAuth(req, res, next) {
-  if (sessionValid(req.cookies?.hochu_session)) return next();
-  res.status(401).json({ error: 'unauthorized' });
-}
-function passwordEqual(input) {
-  if (!APP_PASSWORD) return false;
-  const a = Buffer.from(String(input || ''));
-  const b = Buffer.from(APP_PASSWORD);
-  return a.length === b.length && a.length > 0 && crypto.timingSafeEqual(a, b);
+    if (pool) await pool.query('INSERT INTO audit_log(actor_user_id,action,target_user_id,details) VALUES($1,$2,$3,$4)',[actorUserId,action,targetUserId,JSON.stringify(details)]);
+    else mem.audit.unshift({actorUserId,action,targetUserId,details,createdAt:new Date().toISOString()});
+  } catch {}
 }
 
 async function initDb() {
-  if (!pool) return;
+  if (!pool) { await ensureMemoryAdmin(); return; }
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id UUID PRIMARY KEY,
+      name TEXT NOT NULL,
+      username TEXT NOT NULL UNIQUE,
+      email TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'user',
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_login_at TIMESTAMPTZ
+    )
+  `);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_idx ON users((LOWER(email)))`);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS users_username_lower_idx ON users((LOWER(username)))`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      id UUID PRIMARY KEY,
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL UNIQUE,
+      expires_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions(user_id)`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS invitations (
+      id UUID PRIMARY KEY,
+      token_hash TEXT NOT NULL UNIQUE,
+      label TEXT NOT NULL DEFAULT '',
+      max_uses INTEGER NOT NULL DEFAULT 1,
+      uses INTEGER NOT NULL DEFAULT 0,
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      expires_at TIMESTAMPTZ NOT NULL,
+      created_by UUID REFERENCES users(id) ON DELETE SET NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS access_requests (
+      id UUID PRIMARY KEY,
+      invitation_id UUID REFERENCES invitations(id) ON DELETE SET NULL,
+      name TEXT NOT NULL,
+      username TEXT NOT NULL,
+      email TEXT NOT NULL,
+      password_hash TEXT NOT NULL,
+      message TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      reviewed_at TIMESTAMPTZ,
+      reviewed_by UUID REFERENCES users(id) ON DELETE SET NULL
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS access_requests_status_idx ON access_requests(status)`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS password_reset_requests (
+      id UUID PRIMARY KEY,
+      user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+      email TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      resolved_at TIMESTAMPTZ
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS password_reset_tokens (
+      id UUID PRIMARY KEY,
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL UNIQUE,
+      expires_at TIMESTAMPTZ NOT NULL,
+      used_at TIMESTAMPTZ,
+      created_by UUID REFERENCES users(id) ON DELETE SET NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id BIGSERIAL PRIMARY KEY,
+      actor_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+      action TEXT NOT NULL,
+      target_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+      details JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS wishlist_items (
       id UUID PRIMARY KEY,
+      user_id UUID REFERENCES users(id) ON DELETE CASCADE,
       title TEXT NOT NULL,
       url TEXT NOT NULL DEFAULT '',
       image TEXT NOT NULL DEFAULT '',
@@ -74,131 +189,170 @@ async function initDb() {
       purchased_at TIMESTAMPTZ
     )
   `);
-  await pool.query(`CREATE INDEX IF NOT EXISTS wishlist_status_idx ON wishlist_items(status)`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS wishlist_store_idx ON wishlist_items(store_domain)`);
+  await pool.query(`ALTER TABLE wishlist_items ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id) ON DELETE CASCADE`);
+  const admin = await ensureDbAdmin();
+  if (admin) await pool.query('UPDATE wishlist_items SET user_id=$1 WHERE user_id IS NULL',[admin.id]);
+  await pool.query(`CREATE INDEX IF NOT EXISTS wishlist_user_idx ON wishlist_items(user_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS wishlist_status_idx ON wishlist_items(user_id,status)`);
+  await pool.query(`DELETE FROM sessions WHERE expires_at < NOW()`);
+  await pool.query(`DELETE FROM password_reset_tokens WHERE expires_at < NOW() OR used_at IS NOT NULL`);
 }
+
+async function ensureDbAdmin() {
+  let q = await pool.query(`SELECT * FROM users WHERE role='admin' ORDER BY created_at LIMIT 1`);
+  if (q.rowCount) return q.rows[0];
+  if (!ADMIN_PASSWORD) return null;
+  const hash = await hashPassword(ADMIN_PASSWORD);
+  const id=crypto.randomUUID();
+  q=await pool.query(`INSERT INTO users(id,name,username,email,password_hash,role,status) VALUES($1,$2,$3,$4,$5,'admin','active') RETURNING *`,[id,ADMIN_NAME,ADMIN_USERNAME,ADMIN_EMAIL,hash]);
+  return q.rows[0];
+}
+async function ensureMemoryAdmin() {
+  if (mem.users.some(u=>u.role==='admin') || !ADMIN_PASSWORD) return;
+  mem.users.push({id:crypto.randomUUID(),name:ADMIN_NAME,username:ADMIN_USERNAME,email:ADMIN_EMAIL,password_hash:await hashPassword(ADMIN_PASSWORD),role:'admin',status:'active',createdAt:new Date().toISOString(),lastLoginAt:null});
+}
+
+async function getSessionUser(req) {
+  const raw=String(req.cookies?.[COOKIE_NAME]||''); if(!raw) return null; const hash=tokenHash(raw);
+  if (pool) {
+    const q=await pool.query(`SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>NOW() AND u.status='active' LIMIT 1`,[hash]);
+    if(!q.rowCount) return null;
+    pool.query('UPDATE sessions SET last_seen_at=NOW() WHERE token_hash=$1',[hash]).catch(()=>{});
+    return q.rows[0];
+  }
+  const s=mem.sessions.get(hash); if(!s || s.expiresAt<Date.now()) return null;
+  const u=mem.users.find(x=>x.id===s.userId && x.status==='active'); return u||null;
+}
+async function createSession(res,user) {
+  const raw=newRawToken(); const hash=tokenHash(raw); const expires=new Date(Date.now()+SESSION_TTL_MS);
+  if(pool) await pool.query('INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES($1,$2,$3,$4)',[crypto.randomUUID(),user.id,hash,expires]);
+  else mem.sessions.set(hash,{userId:user.id,expiresAt:expires.getTime()});
+  res.cookie(COOKIE_NAME,raw,cookieOptions());
+}
+async function destroySession(req,res) {
+  const raw=String(req.cookies?.[COOKIE_NAME]||''); if(raw){const hash=tokenHash(raw); if(pool) await pool.query('DELETE FROM sessions WHERE token_hash=$1',[hash]); else mem.sessions.delete(hash);} res.clearCookie(COOKIE_NAME,{path:'/'});
+}
+async function requireAuth(req,res,next){ const u=await getSessionUser(req); if(!u)return res.status(401).json({error:'unauthorized'}); req.user=u; next(); }
+function requireAdmin(req,res,next){ if(req.user?.role!=='admin')return res.status(403).json({error:'Доступ только для администратора.'}); next(); }
 
 function mapRow(r) {
-  return {
-    id: r.id,
-    title: r.title,
-    url: r.url || '',
-    image: r.image || '',
-    store: r.store || '',
-    storeDomain: r.store_domain || '',
-    price: Number(r.price || 0),
-    saved: Number(r.saved || 0),
-    category: r.category || 'Другое',
-    priority: Number(r.priority || 2),
-    status: r.status || 'want',
-    note: r.note || '',
-    createdAt: r.created_at,
-    updatedAt: r.updated_at,
-    purchasedAt: r.purchased_at
-  };
+  return {id:r.id,title:r.title,url:r.url||'',image:r.image||'',store:r.store||'',storeDomain:r.store_domain||r.storeDomain||'',price:Number(r.price||0),saved:Number(r.saved||0),category:r.category||'Другое',priority:Number(r.priority||2),status:r.status||'want',note:r.note||'',createdAt:r.created_at||r.createdAt,updatedAt:r.updated_at||r.updatedAt,purchasedAt:r.purchased_at||r.purchasedAt};
 }
-function cleanItem(x = {}) {
-  const allowedStatus = new Set(['want','plan','ordered','bought','paused']);
-  const price = Math.max(0, Number(x.price || 0));
-  const saved = Math.max(0, Number(x.saved || 0));
-  return {
-    title: String(x.title || '').trim().slice(0, 250),
-    url: String(x.url || '').trim().slice(0, 2000),
-    image: String(x.image || '').trim().slice(0, 4000),
-    store: String(x.store || '').trim().slice(0, 120),
-    storeDomain: String(x.storeDomain || '').trim().slice(0, 250),
-    price,
-    saved,
-    category: String(x.category || 'Другое').trim().slice(0, 80),
-    priority: Math.min(4, Math.max(1, Number(x.priority || 2))),
-    status: allowedStatus.has(String(x.status)) ? String(x.status) : 'want',
-    note: String(x.note || '').trim().slice(0, 2000)
-  };
+function cleanItem(x={}) {
+  const allowedStatus=new Set(['want','plan','ordered','bought','paused']);
+  return {title:cleanShort(x.title,250),url:cleanShort(x.url,2000),image:cleanShort(x.image,4000),store:cleanShort(x.store,120),storeDomain:cleanShort(x.storeDomain,250),price:Math.max(0,Number(x.price||0)),saved:Math.max(0,Number(x.saved||0)),category:cleanShort(x.category||'Другое',80),priority:Math.min(4,Math.max(1,Number(x.priority||2))),status:allowedStatus.has(String(x.status))?String(x.status):'want',note:cleanShort(x.note,2000)};
 }
 
-app.get('/api/health', async (req, res) => {
-  let db = 'memory';
-  if (pool) {
-    try { await pool.query('SELECT 1'); db = 'postgresql'; }
-    catch { db = 'error'; }
+// ----- Public/auth endpoints -----
+app.get('/api/health', async (req,res)=>{
+  let database='memory'; if(pool){try{await pool.query('SELECT 1');database='postgresql'}catch{database='error'}}
+  let adminReady=Boolean(ADMIN_PASSWORD); if(pool){const q=await pool.query(`SELECT 1 FROM users WHERE role='admin' LIMIT 1`);adminReady=Boolean(q.rowCount)}
+  res.json({ok:true,app:'Хочу',version:VERSION,database,adminReady});
+});
+app.get('/api/me', async (req,res)=>{ const u=await getSessionUser(req); res.json({authenticated:Boolean(u),user:safeUser(u),version:VERSION}); });
+app.post('/api/login', rateLimit('login',10,60_000), async (req,res)=>{
+  const login=String(req.body?.login||'').trim().toLowerCase(), password=String(req.body?.password||'');
+  if(!login||!password)return res.status(400).json({error:'Укажи логин/email и пароль.'});
+  let u;
+  if(pool){const q=await pool.query('SELECT * FROM users WHERE LOWER(username)=$1 OR LOWER(email)=$1 LIMIT 1',[login]);u=q.rows[0];}
+  else u=mem.users.find(x=>x.username.toLowerCase()===login||x.email.toLowerCase()===login);
+  if(!u || !(await verifyPassword(password,u.password_hash)))return res.status(401).json({error:'Неверный логин или пароль.'});
+  if(u.status==='blocked')return res.status(403).json({error:'Аккаунт заблокирован администратором.'});
+  if(u.status!=='active')return res.status(403).json({error:'Аккаунт пока не активирован.'});
+  if(pool)await pool.query('UPDATE users SET last_login_at=NOW() WHERE id=$1',[u.id]);else u.lastLoginAt=new Date().toISOString();
+  await createSession(res,u); await audit(u.id,'login',u.id); res.json({ok:true,user:safeUser(u)});
+});
+app.post('/api/logout', async (req,res)=>{const u=await getSessionUser(req);await destroySession(req,res);if(u)await audit(u.id,'logout',u.id);res.json({ok:true});});
+
+app.get('/api/invite/validate', async (req,res)=>{
+  const token=String(req.query.token||''); if(!token)return res.json({valid:false}); const hash=tokenHash(token);
+  if(pool){const q=await pool.query(`SELECT id,label,max_uses,uses,expires_at FROM invitations WHERE token_hash=$1 AND active=TRUE AND expires_at>NOW() AND uses<max_uses LIMIT 1`,[hash]);return res.json(q.rowCount?{valid:true,label:q.rows[0].label}:{valid:false});}
+  const x=mem.invitations.find(i=>i.tokenHash===hash&&i.active&&i.expiresAt>Date.now()&&i.uses<i.maxUses);res.json(x?{valid:true,label:x.label}:{valid:false});
+});
+app.post('/api/access-request', rateLimit('access',5,10*60_000), async (req,res)=>{
+  const name=cleanShort(req.body?.name,80),username=normalizeUsername(req.body?.username),email=normalizeEmail(req.body?.email),password=String(req.body?.password||''),message=cleanShort(req.body?.message,500),inviteToken=String(req.body?.inviteToken||'');
+  if(!name||!validUsername(username)||!validEmail(email)||password.length<8)return res.status(400).json({error:'Проверь имя, логин, email и пароль (минимум 8 символов).'});
+  const inviteHash=tokenHash(inviteToken); let invite=null;
+  if(pool){const iq=await pool.query(`SELECT * FROM invitations WHERE token_hash=$1 AND active=TRUE AND expires_at>NOW() AND uses<max_uses LIMIT 1`,[inviteHash]);invite=iq.rows[0];}
+  else invite=mem.invitations.find(i=>i.tokenHash===inviteHash&&i.active&&i.expiresAt>Date.now()&&i.uses<i.maxUses);
+  if(!invite)return res.status(403).json({error:'Нужна действующая ссылка-приглашение от администратора.'});
+  const passwordHash=await hashPassword(password);
+  if(pool){
+    const exists=await pool.query(`SELECT 1 FROM users WHERE LOWER(email)=$1 OR LOWER(username)=$2 UNION ALL SELECT 1 FROM access_requests WHERE status='pending' AND (LOWER(email)=$1 OR LOWER(username)=$2) LIMIT 1`,[email,username]);
+    if(exists.rowCount)return res.status(409).json({error:'Такой email или логин уже используется либо заявка уже отправлена.'});
+    const pending=await pool.query(`SELECT COUNT(*)::int AS c FROM access_requests WHERE invitation_id=$1 AND status='pending'`,[invite.id]);
+    if(Number(invite.uses)+Number(pending.rows[0].c)>=Number(invite.max_uses))return res.status(409).json({error:'Это приглашение уже используется.'});
+    await pool.query(`INSERT INTO access_requests(id,invitation_id,name,username,email,password_hash,message) VALUES($1,$2,$3,$4,$5,$6,$7)`,[crypto.randomUUID(),invite.id,name,username,email,passwordHash,message]);
+  } else {
+    if(mem.users.some(u=>u.email===email||u.username===username)||mem.accessRequests.some(r=>r.status==='pending'&&(r.email===email||r.username===username)))return res.status(409).json({error:'Такой email или логин уже используется либо заявка уже отправлена.'});
+    mem.accessRequests.push({id:crypto.randomUUID(),invitationId:invite.id,name,username,email,passwordHash,message,status:'pending',createdAt:new Date().toISOString()});
   }
-  res.json({ ok: true, app: 'Хочу', version: VERSION, database: db });
+  res.json({ok:true,message:'Заявка отправлена. После одобрения администратором можно будет войти.'});
+});
+app.post('/api/password-reset/request', rateLimit('reset-request',5,10*60_000), async (req,res)=>{
+  const key=String(req.body?.login||'').trim().toLowerCase();
+  if(pool){const q=await pool.query(`SELECT id,email FROM users WHERE LOWER(email)=$1 OR LOWER(username)=$1 LIMIT 1`,[key]); if(q.rowCount){const u=q.rows[0]; const p=await pool.query(`SELECT 1 FROM password_reset_requests WHERE user_id=$1 AND status='pending' LIMIT 1`,[u.id]); if(!p.rowCount)await pool.query(`INSERT INTO password_reset_requests(id,user_id,email) VALUES($1,$2,$3)`,[crypto.randomUUID(),u.id,u.email]);}}
+  else {const u=mem.users.find(x=>x.email===key||x.username===key);if(u&&!mem.resetRequests.some(r=>r.userId===u.id&&r.status==='pending'))mem.resetRequests.push({id:crypto.randomUUID(),userId:u.id,email:u.email,status:'pending',createdAt:new Date().toISOString()});}
+  res.json({ok:true,message:'Если аккаунт существует, запрос на сброс передан администратору.'});
+});
+app.get('/api/password-reset/validate', async (req,res)=>{
+  const hash=tokenHash(req.query.token||''); if(!hash)return res.json({valid:false});
+  if(pool){const q=await pool.query(`SELECT u.username FROM password_reset_tokens t JOIN users u ON u.id=t.user_id WHERE t.token_hash=$1 AND t.used_at IS NULL AND t.expires_at>NOW() LIMIT 1`,[hash]);return res.json(q.rowCount?{valid:true,username:q.rows[0].username}:{valid:false});}
+  const t=mem.resetTokens.find(x=>x.tokenHash===hash&&!x.usedAt&&x.expiresAt>Date.now());const u=t&&mem.users.find(x=>x.id===t.userId);res.json(u?{valid:true,username:u.username}:{valid:false});
+});
+app.post('/api/password-reset/complete', rateLimit('reset-complete',8,10*60_000), async (req,res)=>{
+  const hash=tokenHash(req.body?.token||''),password=String(req.body?.password||''); if(password.length<8)return res.status(400).json({error:'Пароль должен быть не короче 8 символов.'});
+  const passwordHash=await hashPassword(password);
+  if(pool){const client=await pool.connect();try{await client.query('BEGIN');const q=await client.query(`SELECT * FROM password_reset_tokens WHERE token_hash=$1 AND used_at IS NULL AND expires_at>NOW() LIMIT 1 FOR UPDATE`,[hash]);if(!q.rowCount){await client.query('ROLLBACK');return res.status(400).json({error:'Ссылка сброса недействительна или истекла.'});}const t=q.rows[0];await client.query('UPDATE users SET password_hash=$1,updated_at=NOW() WHERE id=$2',[passwordHash,t.user_id]);await client.query('UPDATE password_reset_tokens SET used_at=NOW() WHERE id=$1',[t.id]);await client.query(`UPDATE password_reset_requests SET status='resolved',resolved_at=NOW() WHERE user_id=$1 AND status IN ('pending','link_issued')`,[t.user_id]);await client.query('DELETE FROM sessions WHERE user_id=$1',[t.user_id]);await client.query('COMMIT');await audit(t.user_id,'password_reset_complete',t.user_id);}catch(e){await client.query('ROLLBACK').catch(()=>{});throw e;}finally{client.release();}}
+  else {const t=mem.resetTokens.find(x=>x.tokenHash===hash&&!x.usedAt&&x.expiresAt>Date.now());if(!t)return res.status(400).json({error:'Ссылка сброса недействительна или истекла.'});const u=mem.users.find(x=>x.id===t.userId);u.password_hash=passwordHash;t.usedAt=Date.now();mem.resetRequests.filter(r=>r.userId===u.id&&r.status==='pending').forEach(r=>r.status='resolved');for(const [k,s] of mem.sessions)if(s.userId===u.id)mem.sessions.delete(k);}
+  res.json({ok:true,message:'Пароль изменён. Теперь можно войти.'});
 });
 
-app.get('/api/me', (req, res) => {
-  res.json({ authenticated: sessionValid(req.cookies?.hochu_session), passwordConfigured: Boolean(APP_PASSWORD) });
-});
-app.post('/api/login', (req, res) => {
-  if (!APP_PASSWORD) return res.status(503).json({ error: 'APP_PASSWORD не задан в Railway Variables.' });
-  if (!passwordEqual(req.body?.password)) return res.status(401).json({ error: 'Неверный пароль' });
-  res.cookie('hochu_session', newSession(), {
-    httpOnly: true,
-    sameSite: 'lax',
-    secure: Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.NODE_ENV === 'production'),
-    maxAge: 1000 * 60 * 60 * 24 * 30
-  });
-  res.json({ ok: true });
-});
-app.post('/api/logout', (req, res) => {
-  res.clearCookie('hochu_session');
-  res.json({ ok: true });
-});
+// ----- Authenticated profile -----
+app.patch('/api/profile', requireAuth, async (req,res)=>{const name=cleanShort(req.body?.name,80);if(!name)return res.status(400).json({error:'Имя не может быть пустым.'});if(pool){const q=await pool.query('UPDATE users SET name=$1,updated_at=NOW() WHERE id=$2 RETURNING *',[name,req.user.id]);res.json({user:safeUser(q.rows[0])});}else{req.user.name=name;res.json({user:safeUser(req.user)});}});
 
-app.get('/api/items', requireAuth, async (req, res) => {
-  if (!pool) return res.json(memory);
-  const q = await pool.query(`
-    SELECT * FROM wishlist_items
-    ORDER BY CASE WHEN status='bought' THEN 1 ELSE 0 END, priority DESC, created_at DESC
-  `);
-  res.json(q.rows.map(mapRow));
+// ----- User-owned wishlist -----
+app.get('/api/items', requireAuth, async (req,res)=>{
+  if(!pool)return res.json(mem.items.filter(x=>x.userId===req.user.id));
+  const q=await pool.query(`SELECT * FROM wishlist_items WHERE user_id=$1 ORDER BY CASE WHEN status='bought' THEN 1 ELSE 0 END,priority DESC,created_at DESC`,[req.user.id]);res.json(q.rows.map(mapRow));
 });
-app.post('/api/items', requireAuth, async (req, res) => {
-  const x = cleanItem(req.body);
-  if (!x.title) return res.status(400).json({ error: 'Укажи название товара.' });
-  const id = crypto.randomUUID();
-  if (!pool) {
-    const now = new Date().toISOString();
-    const item = { id, ...x, createdAt: now, updatedAt: now, purchasedAt: x.status === 'bought' ? now : null };
-    memory.unshift(item); return res.status(201).json(item);
-  }
-  const q = await pool.query(`
-    INSERT INTO wishlist_items
-      (id,title,url,image,store,store_domain,price,saved,category,priority,status,note,purchased_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,CASE WHEN $11='bought' THEN NOW() ELSE NULL END)
-    RETURNING *
-  `,[id,x.title,x.url,x.image,x.store,x.storeDomain,x.price,x.saved,x.category,x.priority,x.status,x.note]);
-  res.status(201).json(mapRow(q.rows[0]));
+app.post('/api/items', requireAuth, async (req,res)=>{
+  const x=cleanItem(req.body);if(!x.title)return res.status(400).json({error:'Укажи название товара.'});const id=crypto.randomUUID();
+  if(!pool){const now=new Date().toISOString();const item={id,userId:req.user.id,...x,createdAt:now,updatedAt:now,purchasedAt:x.status==='bought'?now:null};mem.items.unshift(item);return res.status(201).json(item);}
+  const q=await pool.query(`INSERT INTO wishlist_items(id,user_id,title,url,image,store,store_domain,price,saved,category,priority,status,note,purchased_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,CASE WHEN $12='bought' THEN NOW() ELSE NULL END) RETURNING *`,[id,req.user.id,x.title,x.url,x.image,x.store,x.storeDomain,x.price,x.saved,x.category,x.priority,x.status,x.note]);res.status(201).json(mapRow(q.rows[0]));
 });
-app.put('/api/items/:id', requireAuth, async (req, res) => {
-  const x = cleanItem(req.body);
-  if (!x.title) return res.status(400).json({ error: 'Укажи название товара.' });
-  if (!pool) {
-    const i = memory.findIndex(v => v.id === req.params.id);
-    if (i < 0) return res.status(404).json({ error: 'Не найдено' });
-    const wasBought = memory[i].status === 'bought';
-    memory[i] = { ...memory[i], ...x, updatedAt: new Date().toISOString(), purchasedAt: x.status === 'bought' ? (wasBought ? memory[i].purchasedAt : new Date().toISOString()) : null };
-    return res.json(memory[i]);
-  }
-  const q = await pool.query(`
-    UPDATE wishlist_items SET
-      title=$2,url=$3,image=$4,store=$5,store_domain=$6,price=$7,saved=$8,
-      category=$9,priority=$10,status=$11,note=$12,updated_at=NOW(),
-      purchased_at=CASE WHEN $11='bought' THEN COALESCE(purchased_at,NOW()) ELSE NULL END
-    WHERE id=$1 RETURNING *
-  `,[req.params.id,x.title,x.url,x.image,x.store,x.storeDomain,x.price,x.saved,x.category,x.priority,x.status,x.note]);
-  if (!q.rowCount) return res.status(404).json({ error: 'Не найдено' });
-  res.json(mapRow(q.rows[0]));
+app.put('/api/items/:id', requireAuth, async (req,res)=>{
+  const x=cleanItem(req.body);if(!x.title)return res.status(400).json({error:'Укажи название товара.'});
+  if(!pool){const i=mem.items.findIndex(v=>v.id===req.params.id&&v.userId===req.user.id);if(i<0)return res.status(404).json({error:'Не найдено'});const was=mem.items[i].status==='bought';mem.items[i]={...mem.items[i],...x,updatedAt:new Date().toISOString(),purchasedAt:x.status==='bought'?(was?mem.items[i].purchasedAt:new Date().toISOString()):null};return res.json(mem.items[i]);}
+  const q=await pool.query(`UPDATE wishlist_items SET title=$3,url=$4,image=$5,store=$6,store_domain=$7,price=$8,saved=$9,category=$10,priority=$11,status=$12,note=$13,updated_at=NOW(),purchased_at=CASE WHEN $12='bought' THEN COALESCE(purchased_at,NOW()) ELSE NULL END WHERE id=$1 AND user_id=$2 RETURNING *`,[req.params.id,req.user.id,x.title,x.url,x.image,x.store,x.storeDomain,x.price,x.saved,x.category,x.priority,x.status,x.note]);if(!q.rowCount)return res.status(404).json({error:'Не найдено'});res.json(mapRow(q.rows[0]));
 });
-app.delete('/api/items/:id', requireAuth, async (req, res) => {
-  if (!pool) {
-    const i = memory.findIndex(v => v.id === req.params.id);
-    if (i < 0) return res.status(404).json({ error: 'Не найдено' });
-    memory.splice(i,1); return res.json({ ok: true });
-  }
-  const q = await pool.query('DELETE FROM wishlist_items WHERE id=$1',[req.params.id]);
-  if (!q.rowCount) return res.status(404).json({ error: 'Не найдено' });
-  res.json({ ok: true });
+app.delete('/api/items/:id', requireAuth, async (req,res)=>{if(!pool){const i=mem.items.findIndex(v=>v.id===req.params.id&&v.userId===req.user.id);if(i<0)return res.status(404).json({error:'Не найдено'});mem.items.splice(i,1);return res.json({ok:true});}const q=await pool.query('DELETE FROM wishlist_items WHERE id=$1 AND user_id=$2',[req.params.id,req.user.id]);if(!q.rowCount)return res.status(404).json({error:'Не найдено'});res.json({ok:true});});
+
+// ----- Admin -----
+app.get('/api/admin/overview', requireAuth, requireAdmin, async (req,res)=>{
+  if(pool){const [u,a,r,w]=await Promise.all([pool.query(`SELECT COUNT(*)::int total,COUNT(*) FILTER(WHERE status='active')::int active,COUNT(*) FILTER(WHERE status='blocked')::int blocked FROM users`),pool.query(`SELECT COUNT(*)::int c FROM access_requests WHERE status='pending'`),pool.query(`SELECT COUNT(*)::int c FROM password_reset_requests WHERE status='pending'`),pool.query(`SELECT COUNT(*)::int items,COALESCE(SUM(price),0) total_price,COALESCE(SUM(saved),0) total_saved FROM wishlist_items`)]);return res.json({users:u.rows[0],pendingAccess:a.rows[0].c,pendingResets:r.rows[0].c,wishlist:{items:w.rows[0].items,totalPrice:Number(w.rows[0].total_price),totalSaved:Number(w.rows[0].total_saved)}});}
+  res.json({users:{total:mem.users.length,active:mem.users.filter(x=>x.status==='active').length,blocked:mem.users.filter(x=>x.status==='blocked').length},pendingAccess:mem.accessRequests.filter(x=>x.status==='pending').length,pendingResets:mem.resetRequests.filter(x=>x.status==='pending').length,wishlist:{items:mem.items.length,totalPrice:mem.items.reduce((s,x)=>s+x.price,0),totalSaved:mem.items.reduce((s,x)=>s+x.saved,0)}});
 });
+app.get('/api/admin/users', requireAuth, requireAdmin, async (req,res)=>{
+  if(pool){const q=await pool.query(`SELECT u.id,u.name,u.username,u.email,u.role,u.status,u.created_at,u.last_login_at,COUNT(w.id)::int item_count,COALESCE(SUM(w.price),0) total_price,COALESCE(SUM(w.saved),0) total_saved FROM users u LEFT JOIN wishlist_items w ON w.user_id=u.id GROUP BY u.id ORDER BY CASE WHEN u.role='admin' THEN 0 ELSE 1 END,u.created_at`);return res.json(q.rows.map(x=>({...safeUser(x),itemCount:x.item_count,totalPrice:Number(x.total_price),totalSaved:Number(x.total_saved)})));}
+  res.json(mem.users.map(u=>{const arr=mem.items.filter(i=>i.userId===u.id);return{...safeUser(u),itemCount:arr.length,totalPrice:arr.reduce((s,x)=>s+x.price,0),totalSaved:arr.reduce((s,x)=>s+x.saved,0)}}));
+});
+app.get('/api/admin/access-requests', requireAuth, requireAdmin, async (req,res)=>{if(pool){const q=await pool.query(`SELECT r.id,r.name,r.username,r.email,r.message,r.status,r.created_at,i.label invite_label FROM access_requests r LEFT JOIN invitations i ON i.id=r.invitation_id WHERE r.status='pending' ORDER BY r.created_at`);return res.json(q.rows);}res.json(mem.accessRequests.filter(x=>x.status==='pending'));});
+app.post('/api/admin/access-requests/:id/approve', requireAuth, requireAdmin, async (req,res)=>{
+  if(pool){const client=await pool.connect();try{await client.query('BEGIN');const q=await client.query(`SELECT * FROM access_requests WHERE id=$1 AND status='pending' FOR UPDATE`,[req.params.id]);if(!q.rowCount){await client.query('ROLLBACK');return res.status(404).json({error:'Заявка не найдена.'});}const r=q.rows[0];const dup=await client.query('SELECT 1 FROM users WHERE LOWER(email)=LOWER($1) OR LOWER(username)=LOWER($2) LIMIT 1',[r.email,r.username]);if(dup.rowCount){await client.query('ROLLBACK');return res.status(409).json({error:'Пользователь с таким логином или email уже существует.'});}const id=crypto.randomUUID();await client.query(`INSERT INTO users(id,name,username,email,password_hash,role,status) VALUES($1,$2,$3,$4,$5,'user','active')`,[id,r.name,r.username,r.email,r.password_hash]);await client.query(`UPDATE access_requests SET status='approved',reviewed_at=NOW(),reviewed_by=$2 WHERE id=$1`,[r.id,req.user.id]);if(r.invitation_id)await client.query(`UPDATE invitations SET uses=uses+1,active=CASE WHEN uses+1>=max_uses THEN FALSE ELSE active END WHERE id=$1`,[r.invitation_id]);await client.query('COMMIT');await audit(req.user.id,'access_approved',id,{requestId:r.id});return res.json({ok:true});}catch(e){await client.query('ROLLBACK').catch(()=>{});throw e;}finally{client.release();}}
+  const r=mem.accessRequests.find(x=>x.id===req.params.id&&x.status==='pending');if(!r)return res.status(404).json({error:'Заявка не найдена.'});const id=crypto.randomUUID();mem.users.push({id,name:r.name,username:r.username,email:r.email,password_hash:r.passwordHash,role:'user',status:'active',createdAt:new Date().toISOString()});r.status='approved';const inv=mem.invitations.find(i=>i.id===r.invitationId);if(inv){inv.uses++;if(inv.uses>=inv.maxUses)inv.active=false;}await audit(req.user.id,'access_approved',id);res.json({ok:true});
+});
+app.post('/api/admin/access-requests/:id/decline', requireAuth, requireAdmin, async (req,res)=>{if(pool){const q=await pool.query(`UPDATE access_requests SET status='declined',reviewed_at=NOW(),reviewed_by=$2 WHERE id=$1 AND status='pending' RETURNING id`,[req.params.id,req.user.id]);if(!q.rowCount)return res.status(404).json({error:'Заявка не найдена.'});}else{const r=mem.accessRequests.find(x=>x.id===req.params.id&&x.status==='pending');if(!r)return res.status(404).json({error:'Заявка не найдена.'});r.status='declined';}await audit(req.user.id,'access_declined',null,{requestId:req.params.id});res.json({ok:true});});
+app.get('/api/admin/reset-requests', requireAuth, requireAdmin, async (req,res)=>{if(pool){const q=await pool.query(`SELECT r.id,r.email,r.created_at,u.id user_id,u.name,u.username FROM password_reset_requests r JOIN users u ON u.id=r.user_id WHERE r.status='pending' ORDER BY r.created_at`);return res.json(q.rows);}res.json(mem.resetRequests.filter(x=>x.status==='pending').map(r=>({...r,user:mem.users.find(u=>u.id===r.userId)})));});
+app.post('/api/admin/users/:id/reset-link', requireAuth, requireAdmin, async (req,res)=>{
+  const raw=newRawToken();const hash=tokenHash(raw);const expires=new Date(Date.now()+RESET_TTL_MS);let exists=false;
+  if(pool){const q=await pool.query('SELECT id FROM users WHERE id=$1 LIMIT 1',[req.params.id]);exists=Boolean(q.rowCount);if(exists){await pool.query(`UPDATE password_reset_tokens SET used_at=NOW() WHERE user_id=$1 AND used_at IS NULL`,[req.params.id]);await pool.query(`INSERT INTO password_reset_tokens(id,user_id,token_hash,expires_at,created_by) VALUES($1,$2,$3,$4,$5)`,[crypto.randomUUID(),req.params.id,hash,expires,req.user.id]);await pool.query(`UPDATE password_reset_requests SET status='link_issued',resolved_at=NOW() WHERE user_id=$1 AND status='pending'`,[req.params.id]);}}
+  else{exists=mem.users.some(u=>u.id===req.params.id);if(exists){mem.resetTokens.filter(t=>t.userId===req.params.id&&!t.usedAt).forEach(t=>t.usedAt=Date.now());mem.resetTokens.push({id:crypto.randomUUID(),userId:req.params.id,tokenHash:hash,expiresAt:expires.getTime(),createdBy:req.user.id});mem.resetRequests.filter(r=>r.userId===req.params.id&&r.status==='pending').forEach(r=>r.status='link_issued');}}
+  if(!exists)return res.status(404).json({error:'Пользователь не найден.'});await audit(req.user.id,'password_reset_link_created',req.params.id);res.json({ok:true,url:`${appOrigin(req)}/?reset=${encodeURIComponent(raw)}`,expiresAt:expires.toISOString()});
+});
+app.patch('/api/admin/users/:id/status', requireAuth, requireAdmin, async (req,res)=>{if(req.params.id===req.user.id)return res.status(400).json({error:'Нельзя заблокировать самого себя.'});const status=req.body?.status==='blocked'?'blocked':'active';if(pool){const q=await pool.query(`UPDATE users SET status=$2,updated_at=NOW() WHERE id=$1 AND role<>'admin' RETURNING id`,[req.params.id,status]);if(!q.rowCount)return res.status(404).json({error:'Пользователь не найден.'});if(status==='blocked')await pool.query('DELETE FROM sessions WHERE user_id=$1',[req.params.id]);}else{const u=mem.users.find(x=>x.id===req.params.id&&x.role!=='admin');if(!u)return res.status(404).json({error:'Пользователь не найден.'});u.status=status;if(status==='blocked')for(const [k,s] of mem.sessions)if(s.userId===u.id)mem.sessions.delete(k);}await audit(req.user.id,status==='blocked'?'user_blocked':'user_unblocked',req.params.id);res.json({ok:true});});
+app.delete('/api/admin/users/:id', requireAuth, requireAdmin, async (req,res)=>{if(req.params.id===req.user.id)return res.status(400).json({error:'Нельзя удалить самого себя.'});if(pool){const q=await pool.query(`DELETE FROM users WHERE id=$1 AND role<>'admin' RETURNING id`,[req.params.id]);if(!q.rowCount)return res.status(404).json({error:'Пользователь не найден.'});}else{const i=mem.users.findIndex(x=>x.id===req.params.id&&x.role!=='admin');if(i<0)return res.status(404).json({error:'Пользователь не найден.'});mem.users.splice(i,1);mem.items=mem.items.filter(x=>x.userId!==req.params.id);}await audit(req.user.id,'user_deleted',req.params.id);res.json({ok:true});});
+app.post('/api/admin/invitations', requireAuth, requireAdmin, async (req,res)=>{const label=cleanShort(req.body?.label||'Друг',100),days=Math.min(30,Math.max(1,Number(req.body?.days||7))),maxUses=Math.min(20,Math.max(1,Number(req.body?.maxUses||1)));const raw=newRawToken();const hash=tokenHash(raw);const expires=new Date(Date.now()+days*86400000);if(pool)await pool.query(`INSERT INTO invitations(id,token_hash,label,max_uses,expires_at,created_by) VALUES($1,$2,$3,$4,$5,$6)`,[crypto.randomUUID(),hash,label,maxUses,expires,req.user.id]);else mem.invitations.push({id:crypto.randomUUID(),tokenHash:hash,label,maxUses,uses:0,active:true,expiresAt:expires.getTime(),createdBy:req.user.id});await audit(req.user.id,'invite_created',null,{label,maxUses});res.json({ok:true,url:`${appOrigin(req)}/?invite=${encodeURIComponent(raw)}`,expiresAt:expires.toISOString(),maxUses});});
 
 function findProductJsonLd($) {
   const roots = [];
@@ -545,6 +699,8 @@ app.post('/api/product-preview', requireAuth, async (req, res) => {
     sources: result.source || []
   });
 });
+
+
 
 app.get('*', (req, res) => res.sendFile(`${process.cwd()}/public/index.html`));
 

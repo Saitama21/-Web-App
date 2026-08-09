@@ -25,23 +25,33 @@ function applyStoreFromUrl(){
   updatePreview();
 }
 
+const params = new URLSearchParams(location.search);
 const state = {
   items: [], view: 'home', homeStatus: 'all', theme: localStorage.getItem('hochu-theme') || 'system',
-  profileName: localStorage.getItem('hochu-name') || 'Иван'
+  me: null, inviteToken: params.get('invite') || '', resetToken: params.get('reset') || '',
+  admin: { overview:null, users:[], requests:[], resets:[] }
 };
 
 const els = {
-  loginView:$('loginView'), loginForm:$('loginForm'), passwordInput:$('passwordInput'), loginMessage:$('loginMessage'), togglePassword:$('togglePassword'),
+  loginView:$('loginView'), loginForm:$('loginForm'), loginInput:$('loginInput'), passwordInput:$('passwordInput'), loginMessage:$('loginMessage'), togglePassword:$('togglePassword'),
+  requestAccessBtn:$('requestAccessBtn'), forgotPasswordBtn:$('forgotPasswordBtn'), inviteNotice:$('inviteNotice'), inviteNoticeText:$('inviteNoticeText'), inviteRequestBtn:$('inviteRequestBtn'),
   appShell:$('appShell'), pageTitle:$('pageTitle'), pageSubtitle:$('pageSubtitle'), addTopButton:$('addTopButton'), themeQuick:$('themeQuick'),
+  adminNavItem:$('adminNavItem'), adminNavBadge:$('adminNavBadge'), adminSettingsCard:$('adminSettingsCard'), openAdminSettings:$('openAdminSettings'),
   statCount:$('statCount'), statSaved:$('statSaved'), statSavedSub:$('statSavedSub'), statOrdered:$('statOrdered'), statBought:$('statBought'), statActiveText:$('statActiveText'),
   homeSearch:$('homeSearch'), homeSort:$('homeSort'), homeList:$('homeList'), homeEmpty:$('homeEmpty'), totalActive:$('totalActive'), overallBar:$('overallBar'), overallText:$('overallText'),
   allSearch:$('allSearch'), allStatus:$('allStatus'), allCategory:$('allCategory'), allStore:$('allStore'), allList:$('allList'),
   categoryGrid:$('categoryGrid'), storesGrid:$('storesGrid'), storeCountBadge:$('storeCountBadge'),
   aTotal:$('aTotal'), aSaved:$('aSaved'), aLeft:$('aLeft'), aBought:$('aBought'), aTotalBar:$('aTotalBar'), aSavedBar:$('aSavedBar'), aLeftBar:$('aLeftBar'), aBoughtBar:$('aBoughtBar'), categoryProgress:$('categoryProgress'),
-  profileName:$('profileName'), nameSetting:$('nameSetting'), saveName:$('saveName'), logoutButton:$('logoutButton'), mobileAdd:$('mobileAdd'),
+  profileName:$('profileName'), profileAvatar:$('profileAvatar'), profileRole:$('profileRole'), nameSetting:$('nameSetting'), accountSetting:$('accountSetting'), saveName:$('saveName'), logoutButton:$('logoutButton'), mobileAdd:$('mobileAdd'),
   editor:$('editorDialog'), editorForm:$('editorForm'), editorTitle:$('editorTitle'), editorClose:$('editorClose'), cancelEditor:$('cancelEditor'), deleteItem:$('deleteItem'),
   itemId:$('itemId'), urlInput:$('urlInput'), fetchPreview:$('fetchPreview'), fetchMessage:$('fetchMessage'), titleInput:$('titleInput'), priceInput:$('priceInput'), savedInput:$('savedInput'), categoryInput:$('categoryInput'), priorityInput:$('priorityInput'), statusInput:$('statusInput'), storeInput:$('storeInput'), imageInput:$('imageInput'), noteInput:$('noteInput'),
-  previewImageWrap:$('previewImageWrap'), previewImage:$('previewImage'), previewPlaceholder:$('previewPlaceholder'), previewTitle:$('previewTitle'), previewStoreBadge:$('previewStoreBadge'), previewPrice:$('previewPrice'), previewSaved:$('previewSaved'), previewProgressBar:$('previewProgressBar'), previewProgressText:$('previewProgressText')
+  previewImageWrap:$('previewImageWrap'), previewImage:$('previewImage'), previewPlaceholder:$('previewPlaceholder'), previewTitle:$('previewTitle'), previewStoreBadge:$('previewStoreBadge'), previewPrice:$('previewPrice'), previewSaved:$('previewSaved'), previewProgressBar:$('previewProgressBar'), previewProgressText:$('previewProgressText'),
+  accessDialog:$('accessDialog'), accessForm:$('accessForm'), accessClose:$('accessClose'), accessCancel:$('accessCancel'), accessInviteState:$('accessInviteState'), accessName:$('accessName'), accessUsername:$('accessUsername'), accessEmail:$('accessEmail'), accessPassword:$('accessPassword'), accessPassword2:$('accessPassword2'), accessMessage:$('accessMessage'), accessFormMessage:$('accessFormMessage'),
+  forgotDialog:$('forgotDialog'), forgotForm:$('forgotForm'), forgotClose:$('forgotClose'), forgotCancel:$('forgotCancel'), forgotLogin:$('forgotLogin'), forgotMessage:$('forgotMessage'),
+  resetPasswordDialog:$('resetPasswordDialog'), resetPasswordForm:$('resetPasswordForm'), resetPasswordHint:$('resetPasswordHint'), newPassword:$('newPassword'), newPassword2:$('newPassword2'), resetPasswordMessage:$('resetPasswordMessage'), resetBack:$('resetBack'),
+  inviteDialog:$('inviteDialog'), inviteForm:$('inviteForm'), inviteClose:$('inviteClose'), inviteCancel:$('inviteCancel'), inviteLabel:$('inviteLabel'), inviteDays:$('inviteDays'), inviteUses:$('inviteUses'), inviteMessage:$('inviteMessage'), inviteResult:$('inviteResult'), inviteUrl:$('inviteUrl'), copyInvite:$('copyInvite'), createInviteBtn:$('createInviteBtn'),
+  resetLinkDialog:$('resetLinkDialog'), resetLinkClose:$('resetLinkClose'), resetLinkUrl:$('resetLinkUrl'), copyResetLink:$('copyResetLink'),
+  adminUsersCount:$('adminUsersCount'), adminActiveCount:$('adminActiveCount'), adminPendingCount:$('adminPendingCount'), adminResetCount:$('adminResetCount'), adminItemsCount:$('adminItemsCount'), adminItemsSum:$('adminItemsSum'), accessRequestsList:$('accessRequestsList'), resetRequestsList:$('resetRequestsList'), adminUsersList:$('adminUsersList'), adminUserSearch:$('adminUserSearch')
 };
 
 function money(v){ return new Intl.NumberFormat('uk-UA',{maximumFractionDigits:0}).format(Number(v||0))+' ₴'; }
@@ -88,13 +98,30 @@ function nextTheme(){
   const resolved = state.theme==='system' ? (matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light') : state.theme;
   applyTheme(resolved==='dark'?'light':'dark');
 }
-function updateProfile(){ els.profileName.textContent=state.profileName; els.nameSetting.value=state.profileName; }
+function updateProfile(){
+  const u=state.me; if(!u)return;
+  els.profileName.textContent=u.name||u.username; els.profileAvatar.textContent=(u.name||u.username||'?').trim().charAt(0).toUpperCase();
+  els.profileRole.textContent=u.role==='admin'?'администратор':'личный журнал'; els.nameSetting.value=u.name||''; els.accountSetting.value=`${u.username} · ${u.email}`;
+  els.adminNavItem.classList.toggle('hidden',u.role!=='admin'); els.adminSettingsCard.classList.toggle('hidden',u.role!=='admin');
+}
 
 async function boot(){
-  applyTheme(state.theme); updateProfile();
+  applyTheme(state.theme);
+  if(state.resetToken){ await openResetFromToken(); return; }
+  if(state.inviteToken) await validateInvite();
   const me = await fetch('/api/me').then(r=>r.json()).catch(()=>({authenticated:false}));
   if(!me.authenticated){ showLogin(); return; }
-  showApp(); await loadItems();
+  state.me=me.user; updateProfile(); showApp(); await loadItems();
+  if(state.me?.role==='admin') await refreshAdminBadge();
+}
+async function validateInvite(){
+  try{const r=await fetch(`/api/invite/validate?token=${encodeURIComponent(state.inviteToken)}`);const d=await r.json();if(d.valid){els.inviteNotice.classList.remove('hidden');els.inviteNoticeText.textContent=d.label?`Приглашение для: ${d.label}`:'Можно подать заявку на доступ.';}else{state.inviteToken='';}}
+  catch{state.inviteToken='';}
+}
+async function openResetFromToken(){
+  showLogin();
+  try{const r=await fetch(`/api/password-reset/validate?token=${encodeURIComponent(state.resetToken)}`);const d=await r.json();if(!d.valid){els.loginMessage.textContent='Ссылка сброса недействительна или уже истекла.';return;}els.resetPasswordHint.textContent=`Аккаунт: ${d.username}. Придумай новый пароль — администратор его не увидит.`;els.resetPasswordDialog.showModal();}
+  catch{els.loginMessage.textContent='Не удалось проверить ссылку сброса.';}
 }
 async function loadItems(){
   state.items = await api('/api/items');
@@ -105,16 +132,16 @@ function viewMeta(view){
   return ({
     home:['Мои покупки','Желания, на которые ты копишь'],purchases:['Все покупки','Полный журнал желаний и покупок'],
     categories:['Категории','Сгруппировано по типу покупки'],stores:['Магазины','Где лежат твои хотелки'],
-    stats:['Статистика','Сколько хочется, сколько накоплено'],settings:['Настройки','Оформление и профиль']
+    stats:['Статистика','Сколько хочется, сколько накоплено'],admin:['Администрирование','Пользователи, заявки и доступ'],settings:['Настройки','Оформление и профиль']
   })[view] || ['Хочу','Личный журнал покупок'];
 }
 function setView(view){
   state.view=view;
   $$('.view').forEach(v=>v.classList.remove('active'));
-  $(`#view-${view}`)?.classList.add('active');
+  $(`view-${view}`)?.classList.add('active');
   $$('.nav-item,.mobile-nav-item').forEach(b=>b.classList.toggle('active',b.dataset.view===view));
   const [t,s]=viewMeta(view); els.pageTitle.textContent=t; els.pageSubtitle.textContent=s;
-  if(view==='categories') renderCategories(); if(view==='stores') renderStores(); if(view==='stats') renderStats(); if(view==='purchases') renderAllPurchases();
+  if(view==='categories') renderCategories(); if(view==='stores') renderStores(); if(view==='stats') renderStats(); if(view==='purchases') renderAllPurchases(); if(view==='admin') loadAdmin();
 }
 
 function renderAll(){
@@ -204,14 +231,74 @@ function itemPayload(){
   const url=els.urlInput.value.trim(); return {title:els.titleInput.value.trim(),url,image:validImageUrl(els.imageInput.value),store:els.storeInput.value.trim(),storeDomain:getDomain(url),price:Number(els.priceInput.value||0),saved:Number(els.savedInput.value||0),category:els.categoryInput.value,priority:Number(els.priorityInput.value),status:els.statusInput.value,note:els.noteInput.value.trim()};
 }
 
-els.loginForm.addEventListener('submit',async e=>{e.preventDefault();els.loginMessage.textContent='Проверяю…';try{await api('/api/login',{method:'POST',body:JSON.stringify({password:els.passwordInput.value})});els.passwordInput.value='';els.loginMessage.textContent='';showApp();await loadItems()}catch(err){els.loginMessage.textContent=err.message}});
+function fmtDate(v){ if(!v)return '—'; try{return new Intl.DateTimeFormat('ru-RU',{day:'2-digit',month:'2-digit',year:'numeric'}).format(new Date(v))}catch{return '—'} }
+function roleLabel(role){ return role==='admin'?'Администратор':'Пользователь'; }
+function statusLabel(status){ return status==='blocked'?'Заблокирован':'Активен'; }
+async function refreshAdminBadge(){
+  if(state.me?.role!=='admin')return;
+  try{const o=await api('/api/admin/overview');const n=Number(o.pendingAccess||0)+Number(o.pendingResets||0);els.adminNavBadge.textContent=n;els.adminNavBadge.classList.toggle('hidden',!n);}catch{}
+}
+async function loadAdmin(){
+  if(state.me?.role!=='admin')return;
+  try{
+    const [overview,users,requests,resets]=await Promise.all([api('/api/admin/overview'),api('/api/admin/users'),api('/api/admin/access-requests'),api('/api/admin/reset-requests')]);
+    state.admin={overview,users,requests,resets}; renderAdmin();
+  }catch(err){alert(err.message)}
+}
+function renderAdmin(){
+  const {overview,users,requests,resets}=state.admin;if(!overview)return;
+  els.adminUsersCount.textContent=overview.users.total||0;els.adminActiveCount.textContent=`${overview.users.active||0} активных`;
+  els.adminPendingCount.textContent=overview.pendingAccess||0;els.adminResetCount.textContent=overview.pendingResets||0;els.adminItemsCount.textContent=overview.wishlist.items||0;els.adminItemsSum.textContent=money(overview.wishlist.totalPrice||0);
+  const pending=Number(overview.pendingAccess||0)+Number(overview.pendingResets||0);els.adminNavBadge.textContent=pending;els.adminNavBadge.classList.toggle('hidden',!pending);
+  els.accessRequestsList.innerHTML=requests.length?requests.map(r=>`<article class="admin-request-card"><div class="admin-person"><div class="avatar small">${esc((r.name||'?').charAt(0).toUpperCase())}</div><div><b>${esc(r.name)}</b><small>@${esc(r.username)} · ${esc(r.email)}</small>${r.invite_label?`<small>Приглашение: ${esc(r.invite_label)}</small>`:''}</div></div><div class="request-message">${esc(r.message||'Без сообщения')}</div><div class="request-actions"><button class="secondary" data-decline-request="${r.id}">Отклонить</button><button class="primary" data-approve-request="${r.id}">Одобрить</button></div></article>`).join(''):'<div class="empty-state"><p>Новых заявок нет.</p></div>';
+  els.resetRequestsList.innerHTML=resets.length?resets.map(r=>{const uid=r.user_id||r.userId||r.user?.id;const name=r.name||r.user?.name||r.username||r.user?.username||r.email;return `<article class="admin-request-card reset-request-card"><div class="admin-person"><div class="avatar small">${esc(String(name||'?').charAt(0).toUpperCase())}</div><div><b>${esc(name)}</b><small>${esc(r.username||r.user?.username||'')} · ${esc(r.email)}</small><small>Запрос: ${fmtDate(r.created_at||r.createdAt)}</small></div></div><div class="request-actions"><button class="primary" data-reset-user="${uid}">Создать ссылку</button></div></article>`}).join(''):'<div class="empty-state"><p>Запросов на сброс пароля нет.</p></div>';
+  renderAdminUsers(); bindAdminActions();
+}
+function renderAdminUsers(){
+  const q=(els.adminUserSearch?.value||'').trim().toLowerCase(); const users=state.admin.users.filter(u=>!q||[u.name,u.username,u.email].join(' ').toLowerCase().includes(q));
+  els.adminUsersList.innerHTML=users.map(u=>`<article class="admin-user-row"><div class="admin-person"><div class="avatar small">${esc((u.name||u.username||'?').charAt(0).toUpperCase())}</div><div><b>${esc(u.name)}</b><small>@${esc(u.username)} · ${esc(u.email)}</small></div></div><span class="role-chip ${u.role}">${roleLabel(u.role)}</span><span class="user-status ${u.status}">${statusLabel(u.status)}</span><div class="user-stats"><b>${u.itemCount||0}</b><small>товаров</small></div><div class="user-stats"><b>${money(u.totalSaved||0)}</b><small>накопил</small></div><small class="last-login">${u.lastLoginAt?`вход ${fmtDate(u.lastLoginAt)}`:'ещё не входил'}</small><div class="admin-user-actions">${u.id===state.me.id?'<span class="self-label">это ты</span>':`<button class="secondary mini" data-reset-user="${u.id}">Сброс</button><button class="secondary mini" data-toggle-user="${u.id}" data-next-status="${u.status==='blocked'?'active':'blocked'}">${u.status==='blocked'?'Разблокировать':'Блок'}</button><button class="danger-button mini" data-delete-user="${u.id}">Удалить</button>`}</div></article>`).join('');
+  bindAdminActions();
+}
+function bindAdminActions(){
+  $$('[data-approve-request]').forEach(b=>b.onclick=async()=>{if(!confirm('Одобрить заявку и создать пользователю аккаунт?'))return;try{await api(`/api/admin/access-requests/${b.dataset.approveRequest}/approve`,{method:'POST',body:'{}'});await loadAdmin()}catch(e){alert(e.message)}});
+  $$('[data-decline-request]').forEach(b=>b.onclick=async()=>{if(!confirm('Отклонить заявку?'))return;try{await api(`/api/admin/access-requests/${b.dataset.declineRequest}/decline`,{method:'POST',body:'{}'});await loadAdmin()}catch(e){alert(e.message)}});
+  $$('[data-reset-user]').forEach(b=>b.onclick=()=>createResetLink(b.dataset.resetUser));
+  $$('[data-toggle-user]').forEach(b=>b.onclick=async()=>{const status=b.dataset.nextStatus;if(!confirm(status==='blocked'?'Заблокировать пользователя? Его активные сессии завершатся.':'Разблокировать пользователя?'))return;try{await api(`/api/admin/users/${b.dataset.toggleUser}/status`,{method:'PATCH',body:JSON.stringify({status})});await loadAdmin()}catch(e){alert(e.message)}});
+  $$('[data-delete-user]').forEach(b=>b.onclick=async()=>{if(!confirm('Удалить пользователя и ВСЕ его хотелки? Это действие нельзя отменить.'))return;try{await api(`/api/admin/users/${b.dataset.deleteUser}`,{method:'DELETE'});await loadAdmin()}catch(e){alert(e.message)}});
+}
+async function createResetLink(userId){
+  try{const d=await api(`/api/admin/users/${userId}/reset-link`,{method:'POST',body:'{}'});els.resetLinkUrl.value=d.url;els.resetLinkDialog.showModal();await loadAdmin();}catch(e){alert(e.message)}
+}
+function openAccessDialog(){
+  els.accessForm.reset();els.accessFormMessage.textContent='';
+  if(!state.inviteToken){els.accessInviteState.innerHTML='<b>Нужна ссылка-приглашение</b><span>Попроси администратора создать приглашение и открыть его ссылку.</span>';}
+  else{els.accessInviteState.innerHTML='<b>Приглашение подтверждено ✓</b><span>После заявки администратор всё равно должен одобрить аккаунт.</span>';}
+  els.accessDialog.showModal();
+}
+async function copyText(value,button){
+  try{await navigator.clipboard.writeText(value);const old=button.textContent;button.textContent='Скопировано ✓';setTimeout(()=>button.textContent=old,1600);}catch{prompt('Скопируй ссылку:',value)}
+}
+
+els.loginForm.addEventListener('submit',async e=>{e.preventDefault();els.loginMessage.textContent='Проверяю…';try{const d=await api('/api/login',{method:'POST',body:JSON.stringify({login:els.loginInput.value,password:els.passwordInput.value})});state.me=d.user;els.passwordInput.value='';els.loginMessage.textContent='';updateProfile();showApp();await loadItems();if(state.me?.role==='admin')await refreshAdminBadge()}catch(err){els.loginMessage.textContent=err.message}});
 els.togglePassword.onclick=()=>{els.passwordInput.type=els.passwordInput.type==='password'?'text':'password'};
+els.requestAccessBtn.onclick=openAccessDialog;els.inviteRequestBtn.onclick=openAccessDialog;els.forgotPasswordBtn.onclick=()=>{els.forgotForm.reset();els.forgotMessage.textContent='';els.forgotDialog.showModal()};
+els.accessClose.onclick=els.accessCancel.onclick=()=>els.accessDialog.close();
+els.forgotClose.onclick=els.forgotCancel.onclick=()=>els.forgotDialog.close();
+els.accessForm.addEventListener('submit',async e=>{e.preventDefault();if(!state.inviteToken){els.accessFormMessage.textContent='Открой ссылку-приглашение от администратора.';return}if(els.accessPassword.value!==els.accessPassword2.value){els.accessFormMessage.textContent='Пароли не совпадают.';return}els.accessFormMessage.textContent='Отправляю заявку…';try{const d=await api('/api/access-request',{method:'POST',body:JSON.stringify({inviteToken:state.inviteToken,name:els.accessName.value,username:els.accessUsername.value,email:els.accessEmail.value,password:els.accessPassword.value,message:els.accessMessage.value})});els.accessFormMessage.textContent=d.message;setTimeout(()=>els.accessDialog.close(),1800)}catch(err){els.accessFormMessage.textContent=err.message}});
+els.forgotForm.addEventListener('submit',async e=>{e.preventDefault();els.forgotMessage.textContent='Отправляю…';try{const d=await api('/api/password-reset/request',{method:'POST',body:JSON.stringify({login:els.forgotLogin.value})});els.forgotMessage.textContent=d.message}catch(err){els.forgotMessage.textContent=err.message}});
+els.resetPasswordForm.addEventListener('submit',async e=>{e.preventDefault();if(els.newPassword.value!==els.newPassword2.value){els.resetPasswordMessage.textContent='Пароли не совпадают.';return}els.resetPasswordMessage.textContent='Сохраняю…';try{const d=await api('/api/password-reset/complete',{method:'POST',body:JSON.stringify({token:state.resetToken,password:els.newPassword.value})});els.resetPasswordMessage.textContent=d.message;state.resetToken='';history.replaceState({},'',location.pathname);setTimeout(()=>{els.resetPasswordDialog.close();showLogin()},1200)}catch(err){els.resetPasswordMessage.textContent=err.message}});
+els.resetBack.onclick=()=>{els.resetPasswordDialog.close();state.resetToken='';history.replaceState({},'',location.pathname);showLogin()};
 els.themeQuick.onclick=nextTheme; els.addTopButton.onclick=()=>openEditor(); els.mobileAdd.onclick=()=>openEditor();
 $$('[data-action="add"]').forEach(b=>b.onclick=()=>openEditor());
 $$('.nav-item,.mobile-nav-item').forEach(b=>b.onclick=()=>setView(b.dataset.view));
 $$('.theme-card').forEach(b=>b.onclick=()=>applyTheme(b.dataset.themeChoice));
-els.saveName.onclick=()=>{state.profileName=els.nameSetting.value.trim()||'Иван';localStorage.setItem('hochu-name',state.profileName);updateProfile()};
-els.logoutButton.onclick=async()=>{await fetch('/api/logout',{method:'POST'});showLogin()};
+els.saveName.onclick=async()=>{try{const d=await api('/api/profile',{method:'PATCH',body:JSON.stringify({name:els.nameSetting.value.trim()})});state.me=d.user;updateProfile()}catch(err){alert(err.message)}};
+els.logoutButton.onclick=async()=>{await fetch('/api/logout',{method:'POST'});state.me=null;showLogin()};
+els.adminUserSearch?.addEventListener('input',renderAdminUsers);els.openAdminSettings.onclick=()=>setView('admin');
+els.createInviteBtn.onclick=()=>{els.inviteForm.reset();els.inviteDays.value='7';els.inviteUses.value='1';els.inviteResult.classList.add('hidden');els.inviteMessage.textContent='';els.inviteDialog.showModal()};
+els.inviteClose.onclick=els.inviteCancel.onclick=()=>els.inviteDialog.close();
+els.inviteForm.addEventListener('submit',async e=>{e.preventDefault();els.inviteMessage.textContent='Создаю…';try{const d=await api('/api/admin/invitations',{method:'POST',body:JSON.stringify({label:els.inviteLabel.value,days:Number(els.inviteDays.value),maxUses:Number(els.inviteUses.value)})});els.inviteUrl.value=d.url;els.inviteResult.classList.remove('hidden');els.inviteMessage.textContent=`Действует до ${fmtDate(d.expiresAt)}.`}catch(err){els.inviteMessage.textContent=err.message}});
+els.copyInvite.onclick=()=>copyText(els.inviteUrl.value,els.copyInvite);els.resetLinkClose.onclick=()=>els.resetLinkDialog.close();els.copyResetLink.onclick=()=>copyText(els.resetLinkUrl.value,els.copyResetLink);
 
 els.homeSearch.oninput=renderHome; els.homeSort.onchange=renderHome;
 $$('#homeTabs .tab').forEach(b=>b.onclick=()=>{state.homeStatus=b.dataset.status;$$('#homeTabs .tab').forEach(x=>x.classList.toggle('active',x===b));renderHome()});

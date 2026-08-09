@@ -19,19 +19,25 @@
   <div class="ambient ambient-b"></div>
 
   <section id="loginView" class="auth-view">
-    <form id="loginForm" class="auth-card glass" autocomplete="on">
-      <img src="/assets/icons/icon-192.png" class="auth-icon" alt="Хочу">
-      <div class="kicker">ЛИЧНЫЙ ЖУРНАЛ ПОКУПОК</div>
-      <h1>Хочу</h1>
-      <p>Собирай желания, копи на покупки и не теряй ссылки.</p>
-      <label class="field-label">Пароль</label>
-      <div class="password-wrap">
-        <input id="passwordInput" type="password" placeholder="Введите пароль" autocomplete="current-password" required>
-        <button id="togglePassword" type="button" class="ghost-icon" aria-label="Показать пароль">◉</button>
-      </div>
-      <button class="primary wide" type="submit">Войти</button>
-      <small id="loginMessage" class="form-message"></small>
-    </form>
+    <div class="auth-stage">
+      <form id="loginForm" class="auth-card glass" autocomplete="on">
+        <img src="/assets/icons/icon-192.png" class="auth-icon" alt="Хочу">
+        <div class="kicker">ЛИЧНЫЙ ЖУРНАЛ ПОКУПОК</div>
+        <h1>Хочу</h1>
+        <p>У каждого свой аккаунт и только свой список желаний.</p>
+        <label class="field-label">Логин или email</label>
+        <input id="loginInput" type="text" placeholder="ivan или ivan@example.com" autocomplete="username" required>
+        <label class="field-label">Пароль</label>
+        <div class="password-wrap">
+          <input id="passwordInput" type="password" placeholder="Введите пароль" autocomplete="current-password" required>
+          <button id="togglePassword" type="button" class="ghost-icon" aria-label="Показать пароль">◉</button>
+        </div>
+        <button class="primary wide" type="submit">Войти</button>
+        <div class="auth-links"><button id="forgotPasswordBtn" type="button" class="link-button">Забыли пароль?</button><button id="requestAccessBtn" type="button" class="link-button">Подать заявку</button></div>
+        <small id="loginMessage" class="form-message"></small>
+      </form>
+      <div id="inviteNotice" class="invite-notice glass hidden"><b>Приглашение активно</b><span id="inviteNoticeText">Можно подать заявку на доступ.</span><button id="inviteRequestBtn" class="secondary" type="button">Создать аккаунт</button></div>
+    </div>
   </section>
 
   <div id="appShell" class="app-shell hidden">
@@ -47,12 +53,13 @@
         <button class="nav-item" data-view="categories"><span>⌘</span>Категории</button>
         <button class="nav-item" data-view="stores"><span>▤</span>Магазины</button>
         <button class="nav-item" data-view="stats"><span>▥</span>Статистика</button>
+        <button id="adminNavItem" class="nav-item hidden" data-view="admin"><span>♙</span>Администрирование <em id="adminNavBadge" class="nav-badge hidden">0</em></button>
         <button class="nav-item" data-view="settings"><span>⚙</span>Настройки</button>
       </nav>
 
       <div class="profile-card glass-subtle">
-        <div class="avatar">И</div>
-        <div class="profile-meta"><b id="profileName">Иван</b><small>личный журнал</small></div>
+        <div id="profileAvatar" class="avatar">И</div>
+        <div class="profile-meta"><b id="profileName">Пользователь</b><small id="profileRole">личный журнал</small></div>
         <span class="online-dot"></span>
       </div>
     </aside>
@@ -151,6 +158,30 @@
         <section class="content-panel glass"><div class="panel-head"><div><h3>Прогресс по категориям</h3><p>Сколько накоплено относительно стоимости</p></div></div><div id="categoryProgress" class="category-progress"></div></section>
       </section>
 
+      <section id="view-admin" class="view">
+        <div class="admin-stats-grid">
+          <article class="stat-card glass"><div class="stat-icon green">♙</div><div><span>Пользователей</span><strong id="adminUsersCount">0</strong><small id="adminActiveCount">0 активных</small></div></article>
+          <article class="stat-card glass"><div class="stat-icon amber">◷</div><div><span>Заявки</span><strong id="adminPendingCount">0</strong><small>ждут решения</small></div></article>
+          <article class="stat-card glass"><div class="stat-icon cyan">↻</div><div><span>Сброс пароля</span><strong id="adminResetCount">0</strong><small>запросов</small></div></article>
+          <article class="stat-card glass"><div class="stat-icon mint">▣</div><div><span>Всего хотелок</span><strong id="adminItemsCount">0</strong><small id="adminItemsSum">0 ₴</small></div></article>
+        </div>
+
+        <section class="content-panel glass admin-panel">
+          <div class="panel-head"><div><h3>Заявки на доступ</h3><p>Ты решаешь, кто получит аккаунт</p></div><button id="createInviteBtn" class="primary">＋ Создать приглашение</button></div>
+          <div id="accessRequestsList" class="admin-list"></div>
+        </section>
+
+        <section class="content-panel glass admin-panel">
+          <div class="panel-head"><div><h3>Запросы на сброс пароля</h3><p>Создай одноразовую ссылку — новый пароль пользователь задаст сам</p></div></div>
+          <div id="resetRequestsList" class="admin-list"></div>
+        </section>
+
+        <section class="content-panel glass admin-panel">
+          <div class="panel-head"><div><h3>Пользователи</h3><p>Управление доступом без просмотра чужих паролей</p></div><div class="search-wrap"><span>⌕</span><input id="adminUserSearch" type="search" placeholder="Имя, логин, email…"></div></div>
+          <div id="adminUsersList" class="admin-users-table"></div>
+        </section>
+      </section>
+
       <section id="view-settings" class="view">
         <div class="settings-grid">
           <section class="settings-card glass">
@@ -161,8 +192,8 @@
               <button class="theme-card" data-theme-choice="system"><span class="theme-preview system-preview"></span><b>Системная</b><small>как на устройстве</small></button>
             </div>
           </section>
-          <section class="settings-card glass"><h3>Профиль</h3><p>Имя отображается только в этом браузере.</p><label class="field-label">Имя</label><input id="nameSetting" value="Иван"><button id="saveName" class="secondary">Сохранить имя</button></section>
-          <section class="settings-card glass danger-zone"><h3>Сессия</h3><p>Выйти из журнала на этом устройстве.</p><button id="logoutButton" class="danger-button">Выйти</button></section>
+          <section class="settings-card glass"><h3>Профиль</h3><p>Это имя видно только внутри «Хочу».</p><label class="field-label">Имя</label><input id="nameSetting" value=""><label class="field-label">Аккаунт</label><input id="accountSetting" value="" disabled><button id="saveName" class="secondary">Сохранить имя</button></section>
+          <section id="adminSettingsCard" class="settings-card glass hidden"><h3>Администрирование</h3><p>Заявки, пользователи, приглашения и сброс паролей.</p><button id="openAdminSettings" class="secondary">Открыть панель</button></section><section class="settings-card glass danger-zone"><h3>Сессия</h3><p>Выйти из журнала на этом устройстве.</p><button id="logoutButton" class="danger-button">Выйти</button></section>
         </div>
       </section>
     </main>
@@ -201,6 +232,59 @@
       </div>
       <div class="editor-actions"><button id="deleteItem" type="button" class="danger-button hidden">Удалить</button><span></span><button id="cancelEditor" type="button" class="secondary">Отмена</button><button class="primary" type="submit">Сохранить</button></div>
     </form>
+  </dialog>
+
+  <dialog id="accessDialog">
+    <form id="accessForm" class="auth-modal glass">
+      <div class="editor-head"><div><span class="kicker">ДОСТУП К «ХОЧУ»</span><h2>Заявка на аккаунт</h2></div><button id="accessClose" type="button" class="icon-button">×</button></div>
+      <div id="accessInviteState" class="invite-state"></div>
+      <label>Имя<input id="accessName" required maxlength="80" placeholder="Алексей"></label>
+      <div class="grid2"><label>Логин<input id="accessUsername" required maxlength="40" placeholder="alexey"></label><label>Email<input id="accessEmail" type="email" required placeholder="alexey@example.com"></label></div>
+      <div class="grid2"><label>Пароль<input id="accessPassword" type="password" minlength="8" required autocomplete="new-password"></label><label>Повторить пароль<input id="accessPassword2" type="password" minlength="8" required autocomplete="new-password"></label></div>
+      <label>Сообщение администратору<textarea id="accessMessage" rows="3" maxlength="500" placeholder="Например: это я, Саша 👋"></textarea></label>
+      <small id="accessFormMessage" class="form-message"></small>
+      <div class="modal-actions"><button id="accessCancel" type="button" class="secondary">Отмена</button><button class="primary" type="submit">Отправить заявку</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="forgotDialog">
+    <form id="forgotForm" class="auth-modal glass compact-modal">
+      <div class="editor-head"><div><span class="kicker">ВОССТАНОВЛЕНИЕ</span><h2>Забыли пароль?</h2></div><button id="forgotClose" type="button" class="icon-button">×</button></div>
+      <p class="modal-copy">Укажи логин или email. Запрос появится у администратора, и он выдаст одноразовую ссылку для создания нового пароля.</p>
+      <label>Логин или email<input id="forgotLogin" required placeholder="alexey или alexey@example.com"></label>
+      <small id="forgotMessage" class="form-message"></small>
+      <div class="modal-actions"><button id="forgotCancel" type="button" class="secondary">Отмена</button><button class="primary" type="submit">Отправить запрос</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="resetPasswordDialog">
+    <form id="resetPasswordForm" class="auth-modal glass compact-modal">
+      <div class="editor-head"><div><span class="kicker">НОВЫЙ ПАРОЛЬ</span><h2>Создать новый пароль</h2></div></div>
+      <p id="resetPasswordHint" class="modal-copy"></p>
+      <label>Новый пароль<input id="newPassword" type="password" minlength="8" required autocomplete="new-password"></label>
+      <label>Повторить пароль<input id="newPassword2" type="password" minlength="8" required autocomplete="new-password"></label>
+      <small id="resetPasswordMessage" class="form-message"></small>
+      <div class="modal-actions"><button id="resetBack" type="button" class="secondary">Назад ко входу</button><button class="primary" type="submit">Сохранить пароль</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="inviteDialog">
+    <form id="inviteForm" class="auth-modal glass compact-modal">
+      <div class="editor-head"><div><span class="kicker">ПРИГЛАШЕНИЕ</span><h2>Новая ссылка</h2></div><button id="inviteClose" type="button" class="icon-button">×</button></div>
+      <label>Для кого<input id="inviteLabel" maxlength="100" placeholder="Например, Саша"></label>
+      <div class="grid2"><label>Действует, дней<input id="inviteDays" type="number" min="1" max="30" value="7"></label><label>Количество регистраций<input id="inviteUses" type="number" min="1" max="20" value="1"></label></div>
+      <small id="inviteMessage" class="form-message"></small>
+      <div id="inviteResult" class="copy-result hidden"><input id="inviteUrl" readonly><button id="copyInvite" type="button" class="secondary">Копировать</button></div>
+      <div class="modal-actions"><button id="inviteCancel" type="button" class="secondary">Закрыть</button><button id="generateInvite" class="primary" type="submit">Создать ссылку</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="resetLinkDialog">
+    <div class="auth-modal glass compact-modal">
+      <div class="editor-head"><div><span class="kicker">СБРОС ПАРОЛЯ</span><h2>Одноразовая ссылка</h2></div><button id="resetLinkClose" type="button" class="icon-button">×</button></div>
+      <p class="modal-copy">Отправь эту ссылку пользователю. Она действует 30 минут и позволяет самому задать новый пароль.</p>
+      <div class="copy-result"><input id="resetLinkUrl" readonly><button id="copyResetLink" type="button" class="secondary">Копировать</button></div>
+    </div>
   </dialog>
 
   <script src="/app.js"></script>
