@@ -44,7 +44,7 @@ const els = {
   aTotal:$('aTotal'), aSaved:$('aSaved'), aLeft:$('aLeft'), aBought:$('aBought'), aTotalBar:$('aTotalBar'), aSavedBar:$('aSavedBar'), aLeftBar:$('aLeftBar'), aBoughtBar:$('aBoughtBar'), categoryProgress:$('categoryProgress'),
   profileName:$('profileName'), profileAvatar:$('profileAvatar'), profileRole:$('profileRole'), nameSetting:$('nameSetting'), accountSetting:$('accountSetting'), saveName:$('saveName'), logoutButton:$('logoutButton'), mobileAdd:$('mobileAdd'),
   editor:$('editorDialog'), editorForm:$('editorForm'), editorTitle:$('editorTitle'), editorClose:$('editorClose'), cancelEditor:$('cancelEditor'), deleteItem:$('deleteItem'),
-  itemId:$('itemId'), urlInput:$('urlInput'), fetchPreview:$('fetchPreview'), fetchMessage:$('fetchMessage'), titleInput:$('titleInput'), priceInput:$('priceInput'), savedInput:$('savedInput'), categoryInput:$('categoryInput'), priorityInput:$('priorityInput'), statusInput:$('statusInput'), storeInput:$('storeInput'), imageInput:$('imageInput'), noteInput:$('noteInput'),
+  itemId:$('itemId'), urlInput:$('urlInput'), fetchPreview:$('fetchPreview'), fetchMessage:$('fetchMessage'), titleInput:$('titleInput'), priceInput:$('priceInput'), savedInput:$('savedInput'), categoryInput:$('categoryInput'), priorityInput:$('priorityInput'), statusInput:$('statusInput'), storeInput:$('storeInput'), variantInput:$('variantInput'), imageInput:$('imageInput'), noteInput:$('noteInput'),
   previewImageWrap:$('previewImageWrap'), previewImage:$('previewImage'), previewPlaceholder:$('previewPlaceholder'), previewTitle:$('previewTitle'), previewStoreBadge:$('previewStoreBadge'), previewPrice:$('previewPrice'), previewSaved:$('previewSaved'), previewProgressBar:$('previewProgressBar'), previewProgressText:$('previewProgressText'),
   accessDialog:$('accessDialog'), accessForm:$('accessForm'), accessClose:$('accessClose'), accessCancel:$('accessCancel'), accessInviteState:$('accessInviteState'), accessName:$('accessName'), accessUsername:$('accessUsername'), accessEmail:$('accessEmail'), accessPassword:$('accessPassword'), accessPassword2:$('accessPassword2'), accessMessage:$('accessMessage'), accessFormMessage:$('accessFormMessage'),
   forgotDialog:$('forgotDialog'), forgotForm:$('forgotForm'), forgotClose:$('forgotClose'), forgotCancel:$('forgotCancel'), forgotLogin:$('forgotLogin'), forgotMessage:$('forgotMessage'),
@@ -166,7 +166,7 @@ function itemRow(item){
   const pct=progress(item), safeImage=validImageUrl(item.image), img=safeImage ? `<img class="product-thumb" src="${esc(safeImage)}" alt="" onerror="this.outerHTML='<div class=&quot;thumb-placeholder&quot;>🛍</div>'">` : `<div class="thumb-placeholder">🛍</div>`;
   return `<article class="purchase-row" data-id="${item.id}">
     ${img}
-    <div class="product-main"><div class="product-title">${esc(item.title)}</div><div class="product-meta">${storeBadge(item)}<span class="category-pill">${esc(item.category)}</span></div></div>
+    <div class="product-main"><div class="product-title">${esc(item.title)}</div><div class="product-meta">${storeBadge(item)}${item.variant?`<span class="category-pill">${esc(item.variant)}</span>`:''}<span class="category-pill">${esc(item.category)}</span></div></div>
     <div class="money-block price-block"><span>Цена</span><strong>${money(item.price)}</strong></div>
     <div class="money-block saved-block"><span>Накопил</span><strong>${money(item.saved)}</strong><div class="tiny-progress"><i style="width:${pct}%"></i></div></div>
     ${statusChip(item.status)}
@@ -179,13 +179,13 @@ function bindRows(){
 }
 function renderHome(){
   const q=els.homeSearch.value.trim().toLowerCase();
-  let list=state.items.filter(x=>state.homeStatus==='all'||x.status===state.homeStatus).filter(x=>!q||[x.title,x.store,x.storeDomain,x.category,x.note].join(' ').toLowerCase().includes(q));
+  let list=state.items.filter(x=>state.homeStatus==='all'||x.status===state.homeStatus).filter(x=>!q||[x.title,x.store,x.storeDomain,x.variant,x.category,x.note].join(' ').toLowerCase().includes(q));
   list=sorted(list,els.homeSort.value);
   els.homeList.innerHTML=list.map(itemRow).join(''); els.homeEmpty.classList.toggle('hidden',list.length!==0); bindRows();
 }
 function renderAllPurchases(){
   const q=els.allSearch.value.trim().toLowerCase(), s=els.allStatus.value, c=els.allCategory.value, st=els.allStore.value;
-  const list=state.items.filter(x=>(s==='all'||x.status===s)&&(c==='all'||x.category===c)&&(st==='all'||(x.storeDomain||getDomain(x.url))===st)).filter(x=>!q||[x.title,x.store,x.storeDomain,x.category,x.note].join(' ').toLowerCase().includes(q));
+  const list=state.items.filter(x=>(s==='all'||x.status===s)&&(c==='all'||x.category===c)&&(st==='all'||(x.storeDomain||getDomain(x.url))===st)).filter(x=>!q||[x.title,x.store,x.storeDomain,x.variant,x.category,x.note].join(' ').toLowerCase().includes(q));
   els.allList.innerHTML=list.length?sorted(list,'recent').map(itemRow).join(''):`<div class="empty-state"><h3>Ничего не найдено</h3><p>Измени фильтры или добавь новую покупку.</p></div>`; bindRows();
 }
 function refreshFilters(){
@@ -219,16 +219,16 @@ function resetEditor(){
 }
 function openEditor(id=null){
   resetEditor();
-  if(id){ const x=state.items.find(v=>v.id===id); if(!x)return; els.itemId.value=x.id;els.urlInput.value=x.url||'';els.titleInput.value=x.title||'';els.priceInput.value=x.price||'';els.savedInput.value=x.saved||'';els.categoryInput.value=x.category||'Другое';els.priorityInput.value=String(x.priority||2);els.statusInput.value=x.status||'want';els.storeInput.value=x.store||'';els.imageInput.value=validImageUrl(x.image||'');els.noteInput.value=x.note||'';els.deleteItem.classList.remove('hidden');els.editorTitle.textContent='Редактировать желание'; }
+  if(id){ const x=state.items.find(v=>v.id===id); if(!x)return; els.itemId.value=x.id;els.urlInput.value=x.url||'';els.titleInput.value=x.title||'';els.priceInput.value=x.price||'';els.savedInput.value=x.saved||'';els.categoryInput.value=x.category||'Другое';els.priorityInput.value=String(x.priority||2);els.statusInput.value=x.status||'want';els.storeInput.value=x.store||'';els.variantInput.value=x.variant||'';els.imageInput.value=validImageUrl(x.image||'');els.noteInput.value=x.note||'';els.deleteItem.classList.remove('hidden');els.editorTitle.textContent='Редактировать желание'; }
   updatePreview(); els.editor.showModal();
 }
 function updatePreview(){
-  const title=els.titleInput.value.trim()||'Новое желание',price=Number(els.priceInput.value||0),saved=Number(els.savedInput.value||0),pct=price?clamp(saved/price*100,0,100):0,img=validImageUrl(els.imageInput.value),store=els.storeInput.value.trim()||'Магазин';
-  els.previewTitle.textContent=title;els.previewStoreBadge.textContent=store;els.previewPrice.textContent=money(price);els.previewSaved.textContent=money(saved);els.previewProgressBar.style.width=`${pct}%`;els.previewProgressText.textContent=`${Math.round(pct)}%`;
+  const title=els.titleInput.value.trim()||'Новое желание',price=Number(els.priceInput.value||0),saved=Number(els.savedInput.value||0),pct=price?clamp(saved/price*100,0,100):0,img=validImageUrl(els.imageInput.value),store=els.storeInput.value.trim()||'Магазин',variant=els.variantInput.value.trim();
+  els.previewTitle.textContent=title;els.previewStoreBadge.textContent=variant?`${store} · ${variant}`:store;els.previewPrice.textContent=money(price);els.previewSaved.textContent=money(saved);els.previewProgressBar.style.width=`${pct}%`;els.previewProgressText.textContent=`${Math.round(pct)}%`;
   if(img){els.previewImage.src=img;els.previewImage.style.display='block';els.previewPlaceholder.style.display='none';els.previewImage.onerror=()=>{els.previewImage.style.display='none';els.previewPlaceholder.style.display='block'}}else{els.previewImage.style.display='none';els.previewPlaceholder.style.display='block'}
 }
 function itemPayload(){
-  const url=els.urlInput.value.trim(); return {title:els.titleInput.value.trim(),url,image:validImageUrl(els.imageInput.value),store:els.storeInput.value.trim(),storeDomain:getDomain(url),price:Number(els.priceInput.value||0),saved:Number(els.savedInput.value||0),category:els.categoryInput.value,priority:Number(els.priorityInput.value),status:els.statusInput.value,note:els.noteInput.value.trim()};
+  const url=els.urlInput.value.trim(); return {title:els.titleInput.value.trim(),url,image:validImageUrl(els.imageInput.value),store:els.storeInput.value.trim(),storeDomain:getDomain(url),variant:els.variantInput.value.trim(),price:Number(els.priceInput.value||0),saved:Number(els.savedInput.value||0),category:els.categoryInput.value,priority:Number(els.priorityInput.value),status:els.statusInput.value,note:els.noteInput.value.trim()};
 }
 
 function fmtDate(v){ if(!v)return '—'; try{return new Intl.DateTimeFormat('ru-RU',{day:'2-digit',month:'2-digit',year:'numeric'}).format(new Date(v))}catch{return '—'} }
@@ -317,7 +317,7 @@ $$('#homeTabs .tab').forEach(b=>b.onclick=()=>{state.homeStatus=b.dataset.status
 [els.allSearch,els.allStatus,els.allCategory,els.allStore].forEach(el=>{el.addEventListener(el.tagName==='INPUT'?'input':'change',renderAllPurchases)});
 
 els.editorClose.onclick=()=>els.editor.close(); els.cancelEditor.onclick=()=>els.editor.close();
-[els.titleInput,els.priceInput,els.savedInput,els.storeInput,els.imageInput].forEach(el=>el.addEventListener('input',updatePreview));
+[els.titleInput,els.priceInput,els.savedInput,els.storeInput,els.variantInput,els.imageInput].forEach(el=>el.addEventListener('input',updatePreview));
 els.urlInput.addEventListener('input',applyStoreFromUrl);
 els.urlInput.addEventListener('paste',()=>setTimeout(applyStoreFromUrl,0));
 els.fetchPreview.onclick=async()=>{
@@ -330,6 +330,7 @@ els.fetchPreview.onclick=async()=>{
     if(d.title) els.titleInput.value=d.title;
     if(d.price) els.priceInput.value=d.price;
     if(d.store) els.storeInput.value=d.store;
+    if(d.variant) els.variantInput.value=d.variant;
     if(d.image) els.imageInput.value=validImageUrl(d.image);
     if(d.category) els.categoryInput.value=d.category;
     if(d.canonicalUrl) els.urlInput.value=d.canonicalUrl;
@@ -347,7 +348,7 @@ window.addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key.toLowerCa
 if('serviceWorker' in navigator){
   window.addEventListener('load',async()=>{
     try{
-      const reg=await navigator.serviceWorker.register('/sw.js?v=1.1.4',{updateViaCache:'none'});
+      const reg=await navigator.serviceWorker.register('/sw.js?v=1.1.5',{updateViaCache:'none'});
       await reg.update();
     }catch{}
   });

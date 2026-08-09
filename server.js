@@ -7,7 +7,7 @@ import * as cheerio from 'cheerio';
 const { Pool } = pg;
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
-const VERSION = '1.1.4';
+const VERSION = '1.1.5';
 const DATABASE_URL = String(process.env.DATABASE_URL || '');
 const LEGACY_APP_PASSWORD = String(process.env.APP_PASSWORD || '');
 const ADMIN_EMAIL = normalizeEmail(process.env.ADMIN_EMAIL || 'admin@hochu.local');
@@ -190,6 +190,7 @@ async function initDb() {
       image TEXT NOT NULL DEFAULT '',
       store TEXT NOT NULL DEFAULT '',
       store_domain TEXT NOT NULL DEFAULT '',
+      variant TEXT NOT NULL DEFAULT '',
       price NUMERIC(14,2) NOT NULL DEFAULT 0,
       saved NUMERIC(14,2) NOT NULL DEFAULT 0,
       category TEXT NOT NULL DEFAULT 'Другое',
@@ -202,6 +203,7 @@ async function initDb() {
     )
   `);
   await pool.query(`ALTER TABLE wishlist_items ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id) ON DELETE CASCADE`);
+  await pool.query(`ALTER TABLE wishlist_items ADD COLUMN IF NOT EXISTS variant TEXT NOT NULL DEFAULT ''`);
   const admin = await ensureDbAdmin();
   if (admin) await pool.query('UPDATE wishlist_items SET user_id=$1 WHERE user_id IS NULL',[admin.id]);
   await pool.query(`CREATE INDEX IF NOT EXISTS wishlist_user_idx ON wishlist_items(user_id)`);
@@ -269,11 +271,11 @@ async function requireAuth(req,res,next){ const u=await getSessionUser(req); if(
 function requireAdmin(req,res,next){ if(req.user?.role!=='admin')return res.status(403).json({error:'Доступ только для администратора.'}); next(); }
 
 function mapRow(r) {
-  return {id:r.id,title:r.title,url:r.url||'',image:r.image||'',store:r.store||'',storeDomain:r.store_domain||r.storeDomain||'',price:Number(r.price||0),saved:Number(r.saved||0),category:r.category||'Другое',priority:Number(r.priority||2),status:r.status||'want',note:r.note||'',createdAt:r.created_at||r.createdAt,updatedAt:r.updated_at||r.updatedAt,purchasedAt:r.purchased_at||r.purchasedAt};
+  return {id:r.id,title:r.title,url:r.url||'',image:r.image||'',store:r.store||'',storeDomain:r.store_domain||r.storeDomain||'',variant:r.variant||'',price:Number(r.price||0),saved:Number(r.saved||0),category:r.category||'Другое',priority:Number(r.priority||2),status:r.status||'want',note:r.note||'',createdAt:r.created_at||r.createdAt,updatedAt:r.updated_at||r.updatedAt,purchasedAt:r.purchased_at||r.purchasedAt};
 }
 function cleanItem(x={}) {
   const allowedStatus=new Set(['want','plan','ordered','bought','paused']);
-  return {title:cleanShort(x.title,250),url:cleanShort(x.url,2000),image:cleanShort(x.image,4000),store:cleanShort(x.store,120),storeDomain:cleanShort(x.storeDomain,250),price:Math.max(0,Number(x.price||0)),saved:Math.max(0,Number(x.saved||0)),category:cleanShort(x.category||'Другое',80),priority:Math.min(4,Math.max(1,Number(x.priority||2))),status:allowedStatus.has(String(x.status))?String(x.status):'want',note:cleanShort(x.note,2000)};
+  return {title:cleanShort(x.title,250),url:cleanShort(x.url,2000),image:cleanShort(x.image,4000),store:cleanShort(x.store,120),storeDomain:cleanShort(x.storeDomain,250),variant:cleanShort(x.variant,80),price:Math.max(0,Number(x.price||0)),saved:Math.max(0,Number(x.saved||0)),category:cleanShort(x.category||'Другое',80),priority:Math.min(4,Math.max(1,Number(x.priority||2))),status:allowedStatus.has(String(x.status))?String(x.status):'want',note:cleanShort(x.note,2000)};
 }
 
 // ----- Public/auth endpoints -----
@@ -355,12 +357,12 @@ app.get('/api/items', requireAuth, async (req,res)=>{
 app.post('/api/items', requireAuth, async (req,res)=>{
   const x=cleanItem(req.body);if(!x.title)return res.status(400).json({error:'Укажи название товара.'});const id=crypto.randomUUID();
   if(!pool){const now=new Date().toISOString();const item={id,userId:req.user.id,...x,createdAt:now,updatedAt:now,purchasedAt:x.status==='bought'?now:null};mem.items.unshift(item);return res.status(201).json(item);}
-  const q=await pool.query(`INSERT INTO wishlist_items(id,user_id,title,url,image,store,store_domain,price,saved,category,priority,status,note,purchased_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,CASE WHEN $12='bought' THEN NOW() ELSE NULL END) RETURNING *`,[id,req.user.id,x.title,x.url,x.image,x.store,x.storeDomain,x.price,x.saved,x.category,x.priority,x.status,x.note]);res.status(201).json(mapRow(q.rows[0]));
+  const q=await pool.query(`INSERT INTO wishlist_items(id,user_id,title,url,image,store,store_domain,variant,price,saved,category,priority,status,note,purchased_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,CASE WHEN $13='bought' THEN NOW() ELSE NULL END) RETURNING *`,[id,req.user.id,x.title,x.url,x.image,x.store,x.storeDomain,x.variant,x.price,x.saved,x.category,x.priority,x.status,x.note]);res.status(201).json(mapRow(q.rows[0]));
 });
 app.put('/api/items/:id', requireAuth, async (req,res)=>{
   const x=cleanItem(req.body);if(!x.title)return res.status(400).json({error:'Укажи название товара.'});
   if(!pool){const i=mem.items.findIndex(v=>v.id===req.params.id&&v.userId===req.user.id);if(i<0)return res.status(404).json({error:'Не найдено'});const was=mem.items[i].status==='bought';mem.items[i]={...mem.items[i],...x,updatedAt:new Date().toISOString(),purchasedAt:x.status==='bought'?(was?mem.items[i].purchasedAt:new Date().toISOString()):null};return res.json(mem.items[i]);}
-  const q=await pool.query(`UPDATE wishlist_items SET title=$3,url=$4,image=$5,store=$6,store_domain=$7,price=$8,saved=$9,category=$10,priority=$11,status=$12,note=$13,updated_at=NOW(),purchased_at=CASE WHEN $12='bought' THEN COALESCE(purchased_at,NOW()) ELSE NULL END WHERE id=$1 AND user_id=$2 RETURNING *`,[req.params.id,req.user.id,x.title,x.url,x.image,x.store,x.storeDomain,x.price,x.saved,x.category,x.priority,x.status,x.note]);if(!q.rowCount)return res.status(404).json({error:'Не найдено'});res.json(mapRow(q.rows[0]));
+  const q=await pool.query(`UPDATE wishlist_items SET title=$3,url=$4,image=$5,store=$6,store_domain=$7,variant=$8,price=$9,saved=$10,category=$11,priority=$12,status=$13,note=$14,updated_at=NOW(),purchased_at=CASE WHEN $13='bought' THEN COALESCE(purchased_at,NOW()) ELSE NULL END WHERE id=$1 AND user_id=$2 RETURNING *`,[req.params.id,req.user.id,x.title,x.url,x.image,x.store,x.storeDomain,x.variant,x.price,x.saved,x.category,x.priority,x.status,x.note]);if(!q.rowCount)return res.status(404).json({error:'Не найдено'});res.json(mapRow(q.rows[0]));
 });
 app.delete('/api/items/:id', requireAuth, async (req,res)=>{if(!pool){const i=mem.items.findIndex(v=>v.id===req.params.id&&v.userId===req.user.id);if(i<0)return res.status(404).json({error:'Не найдено'});mem.items.splice(i,1);return res.json({ok:true});}const q=await pool.query('DELETE FROM wishlist_items WHERE id=$1 AND user_id=$2',[req.params.id,req.user.id]);if(!q.rowCount)return res.status(404).json({error:'Не найдено'});res.json({ok:true});});
 
@@ -518,6 +520,7 @@ function mergeProduct(base={}, next={}) {
     title: usableTitle(base.title) || usableTitle(next.title),
     image: base.image || next.image || '',
     price: numericPrice(base.price) || numericPrice(next.price),
+    variant: cleanText(base.variant) || cleanText(next.variant) || '',
     canonicalUrl: base.canonicalUrl || next.canonicalUrl || '',
     source: [...new Set([...(base.source||[]), ...(next.source||[])])]
   };
@@ -547,6 +550,119 @@ function pickProductLike(root, baseUrl='') {
   }
   return bestScore > 0 ? best : {};
 }
+
+function extractMakeupProductId(url='') {
+  const m=String(url).match(/\/product\/(\d+)\/?(?:[?#].*)?$/i);
+  return m ? m[1] : '';
+}
+function normalizeVariant(value='') {
+  const t=cleanText(value)
+    .replace(/(\d)\s*(?:ml|мл)\b/ig,'$1 ml')
+    .replace(/(\d)\s*(?:kg|кг)\b/ig,'$1 kg')
+    .replace(/(\d)\s*(?:g|г)\b/ig,'$1 g');
+  return t.slice(0,80);
+}
+function priceCandidates(text='') {
+  const out=[]; const s=String(text||'');
+  const rx=/(\d[\d\s.,]{0,14})\s*(?:₴|грн|UAH)/gi;
+  let m;
+  while((m=rx.exec(s))){ const value=numericPrice(m[1]); if(value) out.push({value,index:m.index,raw:m[0]}); }
+  return out;
+}
+function makeupPriceBeforeAnchor(text='', anchor=-1) {
+  if(anchor<0) return null;
+  const start=Math.max(0,anchor-1200), window=String(text).slice(start,anchor);
+  const all=priceCandidates(window); if(!all.length) return null;
+  const close=all.filter(x=>x.index>=Math.max(0,window.length-520));
+  const pool=(close.length?close:all.slice(-3)).slice(-3);
+  // MAKEUP renders the current discounted price next to an optional crossed-out old price.
+  // When those values are adjacent, the lower one is the actual current price.
+  if(pool.length>=2 && pool[pool.length-1].index-pool[pool.length-2].index<120) {
+    return Math.min(pool[pool.length-1].value,pool[pool.length-2].value);
+  }
+  return pool[pool.length-1].value;
+}
+function makeupVariantNear(text='', anchor=-1) {
+  if(anchor<0) return '';
+  const window=String(text).slice(anchor,anchor+1800);
+  const m=window.match(/\b(\d{1,4}(?:[.,]\d+)?\s*(?:ml|мл|g|г|kg|кг|шт\.?|pcs?))\b/i);
+  return m ? normalizeVariant(m[1]) : '';
+}
+function makeupImageScore(candidate={}, title='', productId='') {
+  const url=normalizeImage(candidate.url||candidate.src||'', 'https://makeup.com.ua/');
+  if(!url) return -999;
+  const identity=`${url} ${candidate.alt||''}`.toLowerCase();
+  const hay=`${identity} ${candidate.context||''}`.toLowerCase();
+  if(/(?:banner|promo|action|sale|discount|reward|sprite|favicon|logo|icon|heart|gift|pixel|tracking|google)/i.test(identity)) return -100;
+  let score=0;
+  if(/\.(?:jpe?g|webp|png)(?:[?#]|$)/i.test(url)) score+=3;
+  if(/makeup\.com\.ua/i.test(url)) score+=2;
+  if(productId && hay.includes(productId)) score+=7;
+  const words=cleanText(title).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(x=>x.length>3).slice(0,8);
+  const matches=words.filter(w=>hay.includes(w)).length;
+  score+=Math.min(10,matches*2);
+  const w=Number(candidate.width||0), h=Number(candidate.height||0);
+  if(w>=300||h>=300) score+=3;
+  if(candidate.nearProduct) score+=4;
+  return score;
+}
+function chooseMakeupImage(candidates=[], title='', pageUrl='') {
+  const productId=extractMakeupProductId(pageUrl); let best='', bestScore=-999;
+  for(const c of candidates){
+    const url=normalizeImage(c.url||c.src||'',pageUrl); if(!url) continue;
+    const score=makeupImageScore({...c,url},title,productId);
+    if(score>bestScore){bestScore=score;best=url;}
+  }
+  return bestScore>=3 ? best : '';
+}
+function parseMakeupText(text='', pageUrl='', fallbackTitle='') {
+  const s=String(text||''); const productId=extractMakeupProductId(pageUrl);
+  const volumeRx=/(?:\+\s*)?(?:(?:усі|всі)\s+об['’ʼ]?єми|все\s+объ[её]мы)\s*\(\s*\d+\s*\)/i;
+  const volumeMatch=volumeRx.exec(s); const volumeIndex=volumeMatch?.index ?? -1;
+  let codeIndex=-1;
+  if(productId){ const m=new RegExp(`(?:код\\s+товару|код\\s+товара|product\\s+code)\\s*:?\\s*${productId}`,'i').exec(s); codeIndex=m?.index ?? -1; }
+  let price=makeupPriceBeforeAnchor(s,volumeIndex);
+  if(!price) price=makeupPriceBeforeAnchor(s,codeIndex);
+  const variant=makeupVariantNear(s,volumeIndex>=0?volumeIndex:codeIndex);
+  const heading=s.match(/^#\s+(.+)$/m)?.[1] || s.match(/^Title:\s*(.+)$/mi)?.[1] || fallbackTitle;
+  return {title:usableTitle(heading),price,variant,canonicalUrl:pageUrl,source:['makeup-text']};
+}
+function parseMakeupHtml(html, pageUrl) {
+  const $=cheerio.load(html); const title=usableTitle(first($('h1').first().text(),$('meta[property="og:title"]').attr('content'),$('title').text()));
+  const text=$('body').text(); const textData=parseMakeupText(text,pageUrl,title);
+  const candidates=[];
+  $('img').each((_,el)=>{
+    const node=$(el); const parent=(node.closest('main,.product,.product-item,.product-card,.product-page,.product-slider,.gallery').attr('class')||'');
+    candidates.push({url:first(node.attr('src'),node.attr('data-src'),node.attr('data-original'),node.attr('content')),alt:node.attr('alt')||'',context:parent,width:node.attr('width'),height:node.attr('height'),nearProduct:Boolean(parent)});
+  });
+  const ogImage=$('meta[property="og:image"]').attr('content');
+  if(ogImage) candidates.push({url:ogImage,alt:title,context:'og image',nearProduct:false});
+  const p=findProductJsonLd($);
+  if(p?.image) candidates.push({url:p.image,alt:p.name||title,context:'jsonld product',nearProduct:true});
+  const image=chooseMakeupImage(candidates,title,pageUrl);
+  return {...textData,title:title||textData.title,image,canonicalUrl:first($('link[rel="canonical"]').attr('href'),pageUrl),source:['makeup-html',...(textData.source||[])]};
+}
+function parseMakeupReaderMarkdown(text, pageUrl) {
+  const s=String(text||''); const textData=parseMakeupText(s,pageUrl,''); const candidates=[];
+  const rx=/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)(?:\s+"[^"]*")?\)/g; let m;
+  const volumesIndex=s.search(/(?:\+\s*)?(?:(?:усі|всі)\s+об['’ʼ]?єми|все\s+объ[её]мы)/i);
+  const anchor=Math.max(0,volumesIndex>=0?volumesIndex:s.search(/код\s+товар/i));
+  while((m=rx.exec(s))){ candidates.push({url:m[2],alt:m[1],context:s.slice(Math.max(0,m.index-180),Math.min(s.length,m.index+260)),nearProduct:anchor>0&&Math.abs(m.index-anchor)<12000}); }
+  const image=chooseMakeupImage(candidates,textData.title,pageUrl);
+  return {...textData,image,source:['makeup-reader',...(textData.source||[])]};
+}
+function trustedMerge(base={}, next={}) {
+  return {
+    ...base,
+    title: usableTitle(next.title) || usableTitle(base.title),
+    image: next.image || base.image || '',
+    price: numericPrice(next.price) || numericPrice(base.price),
+    variant: cleanText(next.variant) || cleanText(base.variant) || '',
+    canonicalUrl: next.canonicalUrl || base.canonicalUrl || '',
+    source:[...new Set([...(base.source||[]),...(next.source||[])])]
+  };
+}
+
 function parseHtmlProduct(html, pageUrl) {
   const $ = cheerio.load(html);
   const p = findProductJsonLd($);
@@ -571,7 +687,6 @@ function parseHtmlProduct(html, pageUrl) {
     ), pageUrl),
     price: numericPrice(first(
       offer?.price,
-      offer?.lowPrice,
       $('meta[property="product:price:amount"]').attr('content'),
       $('[itemprop="price"]').first().attr('content'),
       $('[itemprop="price"]').first().text(),
@@ -650,12 +765,13 @@ function parseReaderMarkdown(text, pageUrl) {
   const image = s.match(/!\[[^\]]*\]\((https?:\/\/[^)\s]+)\)/)?.[1] || '';
   return { title: usableTitle(heading), price: parsePrice(s.slice(0,220000)), image: normalizeImage(image,pageUrl), canonicalUrl:pageUrl, source:['reader'] };
 }
-async function readerFallback(productUrl) {
+async function readerFallback(productUrl, domain='') {
   try {
     const proxy = `https://r.jina.ai/${productUrl}`;
     const r = await fetch(proxy,{headers:{'user-agent':'Mozilla/5.0','accept':'text/plain'},signal:AbortSignal.timeout(18000)});
     if (!r.ok) return {};
-    return parseReaderMarkdown(await r.text(), productUrl);
+    const text=await r.text();
+    return domain==='makeup.com.ua' ? parseMakeupReaderMarkdown(text,productUrl) : parseReaderMarkdown(text, productUrl);
   } catch { return {}; }
 }
 async function microlinkFallback(productUrl) {
@@ -705,14 +821,29 @@ app.post('/api/product-preview', requireAuth, async (req, res) => {
       directStatus = r.status;
       if (r.ok) {
         const html = await r.text();
-        if (!looksLikeChallenge(html)) result = mergeProduct(result, parseHtmlProduct(html, r.url));
+        if (info.domain === 'makeup.com.ua') { const mk=parseMakeupHtml(html,r.url); if(qualityOf(mk)!=='none') result=trustedMerge(result,mk); }
+        else if (!looksLikeChallenge(html)) result = mergeProduct(result, parseHtmlProduct(html, r.url));
       }
     } catch {}
   }
 
-  // Anti-bot / JS challenge fallback. No API key is required; if unavailable we simply continue to manual mode.
-  if (qualityOf(result) !== 'complete') result = mergeProduct(result, await readerFallback(url));
-  if (qualityOf(result) !== 'complete') result = mergeProduct(result, await microlinkFallback(url));
+  // Anti-bot / JS challenge fallback. MAKEUP needs SKU-aware parsing because its generic
+  // structured data may expose the lowest price across all volumes instead of the selected variant.
+  if (info.domain === 'makeup.com.ua') {
+    const makeupReader=await readerFallback(url,info.domain);
+    if (qualityOf(makeupReader)!=='none') result=trustedMerge(result,makeupReader);
+    // Microlink may still help with the title, but for MAKEUP we only accept its image when
+    // it passes the same anti-banner scoring used by our reader parser.
+    if (!usableTitle(result.title) || !result.image) {
+      const micro=await microlinkFallback(url);
+      if(!usableTitle(result.title)&&usableTitle(micro.title)) result.title=micro.title;
+      if(!result.image&&micro.image&&makeupImageScore({url:micro.image,alt:micro.title||''},result.title,extractMakeupProductId(url))>=3) result.image=micro.image;
+      result.source=[...new Set([...(result.source||[]),...(micro.source||[])])];
+    }
+  } else {
+    if (qualityOf(result) !== 'complete') result = mergeProduct(result, await readerFallback(url,info.domain));
+    if (qualityOf(result) !== 'complete') result = mergeProduct(result, await microlinkFallback(url));
+  }
 
   const quality = qualityOf(result);
   const category = inferCategoryFromTitle(result.title, info.domain);
@@ -725,6 +856,7 @@ app.post('/api/product-preview', requireAuth, async (req, res) => {
     title: usableTitle(result.title),
     image: result.image || '',
     price: numericPrice(result.price),
+    variant: cleanText(result.variant),
     store: info.store,
     storeDomain: info.domain,
     category,

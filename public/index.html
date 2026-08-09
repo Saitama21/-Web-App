@@ -12,7 +12,7 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/assets/icons/apple-touch-icon.png">
   <link rel="icon" href="/assets/icons/favicon-64.png">
-  <link rel="stylesheet" href="/styles.css?v=1.1.4">
+  <link rel="stylesheet" href="/styles.css?v=1.1.5">
 </head>
 <body>
   <div class="ambient ambient-a"></div>
@@ -226,6 +226,7 @@
           <div class="grid2"><label>Цена, ₴<input id="priceInput" type="number" min="0" step="0.01" inputmode="decimal"></label><label>Накопил, ₴<input id="savedInput" type="number" min="0" step="0.01" inputmode="decimal"></label></div>
           <div class="grid2"><label>Категория<select id="categoryInput"><option>Техника</option><option>Аксессуары</option><option>Красота</option><option>Одежда и обувь</option><option>Дом</option><option>Инструменты</option><option>Путешествия</option><option>Подарки</option><option>Другое</option></select></label><label>Приоритет<select id="priorityInput"><option value="1">Низкий</option><option value="2">Средний</option><option value="3">Высокий</option><option value="4">Купить первым</option></select></label></div>
           <div class="grid2"><label>Статус<select id="statusInput"><option value="want">Хочу</option><option value="plan">Планирую</option><option value="ordered">Заказал</option><option value="bought">Куплено</option><option value="paused">Отложено</option></select></label><label>Магазин<input id="storeInput" placeholder="Rozetka"></label></div>
+          <label>Вариант / объём<input id="variantInput" placeholder="Например, 50 ml"></label>
           <label>Изображение<input id="imageInput" type="url" placeholder="Ссылка на изображение (можно оставить пустым)"></label>
           <label>Заметка<textarea id="noteInput" rows="4" placeholder="Почему хочешь купить, что проверить, какая комплектация нужна…"></textarea></label>
         </div>
@@ -287,6 +288,6 @@
     </div>
   </dialog>
 
-  <script src="/app.js?v=1.1.4"></script>
+  <script src="/app.js?v=1.1.5"></script>
 </body>
 </html>
