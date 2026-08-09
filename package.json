@@ -1,6 +1,6 @@
 {
   "name": "hochu-wishlist-webapp",
-  "version": "1.1.10",
+  "version": "1.2.1",
   "private": true,
   "type": "module",
   "engines": {
@@ -10,7 +10,8 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "check": "node --check server.js && node --check public/app.js",
-    "test:parser": "node --test tests/makeup-image-parser.test.mjs"
+    "test:parser": "node --test tests/makeup-image-parser.test.mjs",
+    "test:price": "node --test tests/price-history.test.mjs"
   },
   "dependencies": {
     "cheerio": "^1.0.1",

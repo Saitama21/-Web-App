@@ -10,11 +10,11 @@
   <meta name="apple-mobile-web-app-title" content="Хочу">
   <title>Хочу — журнал покупок</title>
   <link rel="manifest" href="/manifest.webmanifest">
-  <link rel="apple-touch-icon" sizes="180x180" href="/assets/icons/apple-touch-icon.png?v=1.1.10">
-  <link rel="icon" type="image/png" sizes="32x32" href="/assets/icons/favicon-32.png?v=1.1.10">
-  <link rel="icon" type="image/png" sizes="64x64" href="/assets/icons/favicon-64.png?v=1.1.10">
-  <link rel="shortcut icon" href="/assets/icons/favicon.ico?v=1.1.10">
-  <link rel="stylesheet" href="/styles.css?v=1.1.10">
+  <link rel="apple-touch-icon" sizes="180x180" href="/assets/icons/apple-touch-icon.png?v=1.2.1">
+  <link rel="icon" type="image/png" sizes="32x32" href="/assets/icons/favicon-32.png?v=1.2.1">
+  <link rel="icon" type="image/png" sizes="64x64" href="/assets/icons/favicon-64.png?v=1.2.1">
+  <link rel="shortcut icon" href="/assets/icons/favicon.ico?v=1.2.1">
+  <link rel="stylesheet" href="/styles.css?v=1.2.1">
 </head>
 <body>
   <div class="ambient ambient-a"></div>
@@ -224,12 +224,21 @@
           <div id="previewStoreBadge" class="store-badge">Магазин</div>
           <div class="preview-money"><span>Цена</span><strong id="previewPrice">0 ₴</strong></div>
           <div class="preview-money"><span>Накопил</span><strong id="previewSaved">0 ₴</strong></div>
+          <div id="previewRemaining" class="preview-remaining">Осталось накопить 0 ₴</div>
           <div class="progress-track"><i id="previewProgressBar"></i></div><small id="previewProgressText">0%</small>
+          <a id="visitSiteButton" class="visit-site-button hidden" href="#" target="_blank" rel="noopener noreferrer">↗ Перейти на сайт</a>
         </aside>
         <div class="editor-fields">
           <label>Ссылка на товар<div class="url-row"><input id="urlInput" type="url" placeholder="https://…"><button id="fetchPreview" type="button" class="secondary">✦ Подтянуть</button></div><small id="fetchMessage" class="form-message"></small></label>
           <label>Название<input id="titleInput" required placeholder="Например, BLUETTI Premium 30 V2"></label>
           <div class="grid2"><label>Цена, ₴<input id="priceInput" type="number" min="0" step="0.01" inputmode="decimal"></label><label>Накопил, ₴<input id="savedInput" type="number" min="0" step="0.01" inputmode="decimal"></label></div>
+          <div id="savingsHint" class="savings-hint">Укажи цену и сумму накоплений — покажу, сколько осталось.</div>
+          <section id="priceHistorySection" class="price-history-card hidden">
+            <div class="price-history-head"><div><b>История цены</b><small id="priceHistoryCaption">История меняется только если ты вручную изменишь сохранённую цену.</small></div><span id="priceHistoryTrend" class="price-history-trend">—</span></div>
+            <div class="price-history-stats"><span>Минимум <b id="priceHistoryMin">—</b></span><span>Максимум <b id="priceHistoryMax">—</b></span><span>Записей <b id="priceHistoryCount">0</b></span></div>
+            <div class="price-chart-wrap"><svg id="priceHistoryChart" viewBox="0 0 600 160" preserveAspectRatio="none" aria-label="График истории цены"></svg></div>
+            <div id="priceHistoryDates" class="price-history-dates"></div>
+          </section>
           <div class="grid2"><label>Категория<select id="categoryInput"><option>Техника</option><option>Аксессуары</option><option>Красота</option><option>Одежда и обувь</option><option>Дом</option><option>Инструменты</option><option>Путешествия</option><option>Подарки</option><option>Другое</option></select></label><label>Приоритет<select id="priorityInput"><option value="1">Низкий</option><option value="2">Средний</option><option value="3">Высокий</option><option value="4">Купить первым</option></select></label></div>
           <div class="grid2"><label>Статус<select id="statusInput"><option value="want">Хочу</option><option value="plan">Планирую</option><option value="ordered">Заказал</option><option value="bought">Куплено</option><option value="paused">Отложено</option></select></label><label>Магазин<input id="storeInput" placeholder="Rozetka"></label></div>
           <label>Вариант / объём<input id="variantInput" placeholder="Например, 50 ml"></label>
@@ -324,6 +333,6 @@
     </div>
   </dialog>
 
-  <script src="/app.js?v=1.1.10"></script>
+  <script src="/app.js?v=1.2.1"></script>
 </body>
 </html>

@@ -46,7 +46,8 @@ const els = {
   openInstallGuide:$('openInstallGuide'), installGuideDialog:$('installGuideDialog'), installGuideClose:$('installGuideClose'), installGuideDone:$('installGuideDone'), installStatus:$('installStatus'), installNow:$('installNow'),
   editor:$('editorDialog'), editorForm:$('editorForm'), editorTitle:$('editorTitle'), editorClose:$('editorClose'), cancelEditor:$('cancelEditor'), deleteItem:$('deleteItem'),
   itemId:$('itemId'), urlInput:$('urlInput'), fetchPreview:$('fetchPreview'), fetchMessage:$('fetchMessage'), titleInput:$('titleInput'), priceInput:$('priceInput'), savedInput:$('savedInput'), categoryInput:$('categoryInput'), priorityInput:$('priorityInput'), statusInput:$('statusInput'), storeInput:$('storeInput'), variantInput:$('variantInput'), imageInput:$('imageInput'), noteInput:$('noteInput'),
-  previewImageWrap:$('previewImageWrap'), previewImage:$('previewImage'), previewPlaceholder:$('previewPlaceholder'), previewTitle:$('previewTitle'), previewStoreBadge:$('previewStoreBadge'), previewPrice:$('previewPrice'), previewSaved:$('previewSaved'), previewProgressBar:$('previewProgressBar'), previewProgressText:$('previewProgressText'),
+  previewImageWrap:$('previewImageWrap'), previewImage:$('previewImage'), previewPlaceholder:$('previewPlaceholder'), previewTitle:$('previewTitle'), previewStoreBadge:$('previewStoreBadge'), previewPrice:$('previewPrice'), previewSaved:$('previewSaved'), previewRemaining:$('previewRemaining'), previewProgressBar:$('previewProgressBar'), previewProgressText:$('previewProgressText'), visitSiteButton:$('visitSiteButton'),
+  savingsHint:$('savingsHint'), priceHistorySection:$('priceHistorySection'), priceHistoryCaption:$('priceHistoryCaption'), priceHistoryTrend:$('priceHistoryTrend'), priceHistoryMin:$('priceHistoryMin'), priceHistoryMax:$('priceHistoryMax'), priceHistoryCount:$('priceHistoryCount'), priceHistoryChart:$('priceHistoryChart'), priceHistoryDates:$('priceHistoryDates'),
   accessDialog:$('accessDialog'), accessForm:$('accessForm'), accessClose:$('accessClose'), accessCancel:$('accessCancel'), accessInviteState:$('accessInviteState'), accessName:$('accessName'), accessUsername:$('accessUsername'), accessEmail:$('accessEmail'), accessPassword:$('accessPassword'), accessPassword2:$('accessPassword2'), accessMessage:$('accessMessage'), accessFormMessage:$('accessFormMessage'),
   forgotDialog:$('forgotDialog'), forgotForm:$('forgotForm'), forgotClose:$('forgotClose'), forgotCancel:$('forgotCancel'), forgotLogin:$('forgotLogin'), forgotMessage:$('forgotMessage'),
   resetPasswordDialog:$('resetPasswordDialog'), resetPasswordForm:$('resetPasswordForm'), resetPasswordHint:$('resetPasswordHint'), newPassword:$('newPassword'), newPassword2:$('newPassword2'), resetPasswordMessage:$('resetPasswordMessage'), resetBack:$('resetBack'),
@@ -77,6 +78,17 @@ function storeBadge(item){
   return `<span class="store-pill">${logo}${esc(storeName({...item,storeDomain:d}))}</span>`;
 }
 function statusChip(status){ const s=STATUS[status]||STATUS.want; return `<span class="status-chip ${s[1]}">${s[0]}</span>`; }
+function priceTrend(item){
+  const current=Number(item.price||0), prev=Number(item.previousPrice||0);
+  if(!current||!prev||Math.abs(current-prev)<0.01) return null;
+  const pct=Math.abs((current-prev)/prev*100);
+  return {direction:current<prev?'down':'up',pct,amount:Math.abs(current-prev)};
+}
+function trendChip(item){
+  const t=priceTrend(item);
+  if(!t) return Number(item.historyCount||0)>1?`<span class="price-trend flat">◷ ${Number(item.historyCount)} цен</span>`:'';
+  return `<span class="price-trend ${t.direction}">${t.direction==='down'?'↓':'↑'} ${t.pct<1?t.pct.toFixed(1):Math.round(t.pct)}%</span>`;
+}
 
 async function api(url, options={}){
   const opts = {...options, headers:{'content-type':'application/json',...(options.headers||{})}};
@@ -217,11 +229,13 @@ function sorted(items, mode){
 }
 function itemRow(item){
   const pct=progress(item), safeImage=validImageUrl(item.image), img=safeImage ? `<img class="product-thumb" src="${esc(safeImage)}" alt="" onerror="this.outerHTML='<div class=&quot;thumb-placeholder&quot;>🛍</div>'">` : `<div class="thumb-placeholder">🛍</div>`;
+  const left=Math.max(0,Number(item.price||0)-Number(item.saved||0));
+  const funded=Number(item.price||0)>0 && Number(item.saved||0)>=Number(item.price||0);
   return `<article class="purchase-row" data-id="${item.id}">
     ${img}
-    <div class="product-main"><div class="product-title">${esc(item.title)}</div><div class="product-meta">${storeBadge(item)}${item.variant?`<span class="category-pill">${esc(item.variant)}</span>`:''}<span class="category-pill">${esc(item.category)}</span></div></div>
-    <div class="money-block price-block"><span>Цена</span><strong>${money(item.price)}</strong></div>
-    <div class="money-block saved-block"><span>Накопил</span><strong>${money(item.saved)}</strong><div class="tiny-progress"><i style="width:${pct}%"></i></div></div>
+    <div class="product-main"><div class="product-title">${esc(item.title)}</div><div class="product-meta">${storeBadge(item)}${item.variant?`<span class="category-pill">${esc(item.variant)}</span>`:''}<span class="category-pill">${esc(item.category)}</span>${trendChip(item)}</div></div>
+    <div class="money-block price-block"><span>Цена</span><strong>${money(item.price)}</strong>${Number(item.minPrice||0)&&Number(item.minPrice)<Number(item.price||0)?`<small>мин. ${money(item.minPrice)}</small>`:''}</div>
+    <div class="money-block saved-block"><span>Накопил</span><strong>${money(item.saved)}</strong><div class="tiny-progress"><i style="width:${pct}%"></i></div><small class="remaining-hint ${funded?'funded':''}">${funded?'Собрано ✓':`Осталось ${money(left)}`}</small></div>
     ${statusChip(item.status)}
     <button class="row-menu" data-edit="${item.id}" aria-label="Редактировать">⋮</button>
   </article>`;
@@ -267,18 +281,65 @@ function renderStats(){
   els.categoryProgress.innerHTML=Object.entries(groups).map(([cat,arr])=>{const t=arr.reduce((s,x)=>s+x.price,0),sv=arr.reduce((s,x)=>s+Math.min(x.saved,x.price||x.saved),0),pct=t?sv/t*100:0;return `<div class="progress-row"><label>${esc(cat)}</label><div class="bar"><i style="width:${clamp(pct,0,100)}%"></i></div><span>${Math.round(pct)}% · ${money(sv)}</span></div>`}).join('')||'<div class="empty-state"><p>Статистика появится после добавления желаний.</p></div>';
 }
 
+function updateSiteLink(){
+  const url=els.urlInput.value.trim();
+  try{
+    const parsed=new URL(url);
+    if(!/^https?:$/.test(parsed.protocol)) throw new Error('bad protocol');
+    els.visitSiteButton.href=parsed.href;
+    els.visitSiteButton.classList.remove('hidden');
+  }catch{
+    els.visitSiteButton.href='#';
+    els.visitSiteButton.classList.add('hidden');
+  }
+}
 function resetEditor(){
-  els.editorForm.reset(); els.itemId.value=''; els.fetchMessage.textContent=''; els.fetchPreview.textContent='✦ Подтянуть'; els.deleteItem.classList.add('hidden'); els.editorTitle.textContent='Новое желание'; els.priorityInput.value='2'; els.statusInput.value='want'; els.categoryInput.value='Техника'; updatePreview();
+  els.editorForm.reset(); els.itemId.value=''; els.fetchMessage.textContent=''; els.fetchPreview.textContent='✦ Подтянуть'; els.fetchPreview.classList.remove('hidden'); els.deleteItem.classList.add('hidden'); els.editorTitle.textContent='Новое желание'; els.priorityInput.value='2'; els.statusInput.value='want'; els.categoryInput.value='Техника';
+  els.priceHistorySection.classList.add('hidden'); els.priceHistoryChart.innerHTML=''; els.priceHistoryDates.innerHTML='';
+  updatePreview(); updateSiteLink();
 }
 function openEditor(id=null){
   resetEditor();
-  if(id){ const x=state.items.find(v=>v.id===id); if(!x)return; els.itemId.value=x.id;els.urlInput.value=x.url||'';els.titleInput.value=x.title||'';els.priceInput.value=x.price||'';els.savedInput.value=x.saved||'';els.categoryInput.value=x.category||'Другое';els.priorityInput.value=String(x.priority||2);els.statusInput.value=x.status||'want';els.storeInput.value=x.store||'';els.variantInput.value=x.variant||'';els.imageInput.value=validImageUrl(x.image||'');els.noteInput.value=x.note||'';els.deleteItem.classList.remove('hidden');els.editorTitle.textContent='Редактировать желание'; }
-  updatePreview(); els.editor.showModal();
+  if(id){ const x=state.items.find(v=>v.id===id); if(!x)return; els.itemId.value=x.id;els.urlInput.value=x.url||'';els.titleInput.value=x.title||'';els.priceInput.value=x.price||'';els.savedInput.value=x.saved||'';els.categoryInput.value=x.category||'Другое';els.priorityInput.value=String(x.priority||2);els.statusInput.value=x.status||'want';els.storeInput.value=x.store||'';els.variantInput.value=x.variant||'';els.imageInput.value=validImageUrl(x.image||'');els.noteInput.value=x.note||'';els.deleteItem.classList.remove('hidden');els.editorTitle.textContent='Карточка желания';els.fetchPreview.classList.add('hidden');els.fetchMessage.textContent='Цена сохранена в «Хочу». Актуальную цену проверь на сайте магазина.';loadPriceHistory(x.id); }
+  updatePreview(); updateSiteLink(); els.editor.showModal();
 }
 function updatePreview(){
   const title=els.titleInput.value.trim()||'Новое желание',price=Number(els.priceInput.value||0),saved=Number(els.savedInput.value||0),pct=price?clamp(saved/price*100,0,100):0,img=validImageUrl(els.imageInput.value),store=els.storeInput.value.trim()||'Магазин',variant=els.variantInput.value.trim();
+  const left=Math.max(0,price-saved), funded=price>0&&saved>=price;
   els.previewTitle.textContent=title;els.previewStoreBadge.textContent=variant?`${store} · ${variant}`:store;els.previewPrice.textContent=money(price);els.previewSaved.textContent=money(saved);els.previewProgressBar.style.width=`${pct}%`;els.previewProgressText.textContent=`${Math.round(pct)}%`;
+  els.previewRemaining.textContent=!price?'Укажи цену':funded?'Деньги собраны ✓':`Осталось ${money(left)}`;
+  els.previewRemaining.classList.toggle('funded',funded);
+  els.savingsHint.innerHTML=!price?'Укажи цену и сумму накоплений — покажу, сколько осталось.':funded?`<b>Деньги собраны ✓</b> На покупку хватает. Ты накопил ${money(saved)}.`:`Осталось накопить <b>${money(left)}</b> · готово ${Math.round(pct)}%.`;
+  els.savingsHint.classList.toggle('funded',funded);
   if(img){els.previewImage.src=img;els.previewImage.style.display='block';els.previewPlaceholder.style.display='none';els.previewImage.onerror=()=>{els.previewImage.style.display='none';els.previewPlaceholder.style.display='block'}}else{els.previewImage.style.display='none';els.previewPlaceholder.style.display='block'}
+}
+function renderPriceHistory(data){
+  const entries=(data.entries||[]).filter(x=>Number(x.price)>0);
+  const summary=data.summary||{};
+  els.priceHistorySection.classList.remove('hidden');
+  els.priceHistoryMin.textContent=entries.length?money(summary.minPrice):'—';
+  els.priceHistoryMax.textContent=entries.length?money(summary.maxPrice):'—';
+  els.priceHistoryCount.textContent=entries.length;
+  const prev=Number(summary.previousPrice||0), current=Number(summary.currentPrice||0);
+  if(prev&&current&&Math.abs(prev-current)>=0.01){
+    const down=current<prev,pct=Math.abs((current-prev)/prev*100);
+    els.priceHistoryTrend.className=`price-history-trend ${down?'down':'up'}`;
+    els.priceHistoryTrend.textContent=`${down?'↓':'↑'} ${pct<1?pct.toFixed(1):Math.round(pct)}%`;
+  }else{els.priceHistoryTrend.className='price-history-trend';els.priceHistoryTrend.textContent=entries.length>1?'Без изменений':'Первая цена';}
+  els.priceHistoryCaption.textContent=entries.length>1?'История меняется только когда ты вручную сохраняешь другую цену.':'Это сохранённая цена. Если вручную изменишь её позже, появится следующая точка.';
+  els.priceHistoryChart.innerHTML='';
+  if(entries.length){
+    const W=600,H=160,PX=12,PY=18,prices=entries.map(x=>Number(x.price)),min=Math.min(...prices),max=Math.max(...prices),spread=Math.max(1,max-min);
+    const pts=entries.map((x,i)=>{const px=entries.length===1?W/2:PX+i*(W-PX*2)/(entries.length-1);const py=PY+(max-Number(x.price))*(H-PY*2)/spread;return [px,py];});
+    const ns='http://www.w3.org/2000/svg';
+    const area=document.createElementNS(ns,'polygon');area.setAttribute('class','price-chart-area');area.setAttribute('points',`${PX},${H-PY} ${pts.map(p=>p.join(',')).join(' ')} ${W-PX},${H-PY}`);els.priceHistoryChart.appendChild(area);
+    const line=document.createElementNS(ns,'polyline');line.setAttribute('class','price-chart-line');line.setAttribute('points',pts.map(p=>p.join(',')).join(' '));els.priceHistoryChart.appendChild(line);
+    pts.forEach((p,i)=>{const c=document.createElementNS(ns,'circle');c.setAttribute('class','price-chart-dot');c.setAttribute('cx',p[0]);c.setAttribute('cy',p[1]);c.setAttribute('r',entries.length===1?'6':'4');const title=document.createElementNS(ns,'title');title.textContent=`${money(entries[i].price)} · ${fmtDate(entries[i].recordedAt)}`;c.appendChild(title);els.priceHistoryChart.appendChild(c)});
+    els.priceHistoryDates.innerHTML=`<span>${fmtDate(entries[0].recordedAt)}</span><span>${entries.length>1?fmtDate(entries.at(-1).recordedAt):money(entries[0].price)}</span>`;
+  }
+}
+async function loadPriceHistory(id){
+  try{const data=await api(`/api/items/${id}/price-history`);if(els.itemId.value===id)renderPriceHistory(data)}catch{if(els.itemId.value===id)els.priceHistorySection.classList.add('hidden')}
 }
 function itemPayload(){
   const url=els.urlInput.value.trim(); return {title:els.titleInput.value.trim(),url,image:validImageUrl(els.imageInput.value),store:els.storeInput.value.trim(),storeDomain:getDomain(url),variant:els.variantInput.value.trim(),price:Number(els.priceInput.value||0),saved:Number(els.savedInput.value||0),category:els.categoryInput.value,priority:Number(els.priorityInput.value),status:els.statusInput.value,note:els.noteInput.value.trim()};
@@ -380,8 +441,8 @@ $$('#homeTabs .tab').forEach(b=>b.onclick=()=>{state.homeStatus=b.dataset.status
 
 els.editorClose.onclick=()=>els.editor.close(); els.cancelEditor.onclick=()=>els.editor.close();
 [els.titleInput,els.priceInput,els.savedInput,els.storeInput,els.variantInput,els.imageInput].forEach(el=>el.addEventListener('input',updatePreview));
-els.urlInput.addEventListener('input',applyStoreFromUrl);
-els.urlInput.addEventListener('paste',()=>setTimeout(applyStoreFromUrl,0));
+els.urlInput.addEventListener('input',()=>{applyStoreFromUrl();updateSiteLink()});
+els.urlInput.addEventListener('paste',()=>setTimeout(()=>{applyStoreFromUrl();updateSiteLink()},0));
 els.fetchPreview.onclick=async()=>{
   const url=els.urlInput.value.trim();
   if(!url){els.fetchMessage.textContent='Сначала вставь ссылку.';return}
@@ -397,7 +458,7 @@ els.fetchPreview.onclick=async()=>{
     if(d.category) els.categoryInput.value=d.category;
     if(d.canonicalUrl) els.urlInput.value=d.canonicalUrl;
     els.fetchMessage.textContent=d.message || (d.quality==='partial'?'Получены не все данные — проверь поля.':d.quality==='none'?'Не удалось получить данные автоматически. Заполни поля вручную.':'Готово. Проверь данные перед сохранением.');
-    els.fetchPreview.textContent=d.quality==='none'?'✦ Подтянуть':'↻ Обновить';
+    els.fetchPreview.textContent=d.quality==='none'?'✦ Подтянуть':'✦ Подтянуть снова';
     updatePreview();
   }catch(err){
     els.fetchMessage.textContent='Не удалось получить данные автоматически. Ссылка останется в карточке — заполни поля вручную.';
@@ -412,7 +473,7 @@ window.addEventListener('appinstalled',()=>{deferredInstallPrompt=null;updateIns
 if('serviceWorker' in navigator){
   window.addEventListener('load',async()=>{
     try{
-      const reg=await navigator.serviceWorker.register('/sw.js?v=1.1.10',{updateViaCache:'none'});
+      const reg=await navigator.serviceWorker.register('/sw.js?v=1.2.1',{updateViaCache:'none'});
       await reg.update();
     }catch{}
   });

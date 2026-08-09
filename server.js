@@ -3,11 +3,12 @@ import cookieParser from 'cookie-parser';
 import crypto from 'crypto';
 import pg from 'pg';
 import * as cheerio from 'cheerio';
+import { priceHistorySummary } from './lib/price-history.js';
 
 const { Pool } = pg;
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
-const VERSION = '1.1.10';
+const VERSION = '1.2.1';
 const DATABASE_URL = String(process.env.DATABASE_URL || '');
 const LEGACY_APP_PASSWORD = String(process.env.APP_PASSWORD || '');
 const ADMIN_EMAIL = normalizeEmail(process.env.ADMIN_EMAIL || 'admin@hochu.local');
@@ -42,7 +43,7 @@ const pool = DATABASE_URL ? new Pool({
 
 // In-memory fallback keeps local development/test mode working without PostgreSQL.
 const mem = {
-  users: [], sessions: new Map(), items: [], accessRequests: [], resetRequests: [], resetTokens: [], invitations: [], audit: []
+  users: [], sessions: new Map(), items: [], priceHistory: [], accessRequests: [], resetRequests: [], resetTokens: [], invitations: [], audit: []
 };
 
 function cleanShort(value='', max=120) { return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0,max); }
@@ -204,10 +205,29 @@ async function initDb() {
   `);
   await pool.query(`ALTER TABLE wishlist_items ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id) ON DELETE CASCADE`);
   await pool.query(`ALTER TABLE wishlist_items ADD COLUMN IF NOT EXISTS variant TEXT NOT NULL DEFAULT ''`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS price_history (
+      id BIGSERIAL PRIMARY KEY,
+      item_id UUID NOT NULL REFERENCES wishlist_items(id) ON DELETE CASCADE,
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      price NUMERIC(14,2) NOT NULL,
+      source TEXT NOT NULL DEFAULT 'manual',
+      recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS price_history_item_idx ON price_history(item_id,recorded_at)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS price_history_user_idx ON price_history(user_id,recorded_at)`);
   const admin = await ensureDbAdmin();
   if (admin) await pool.query('UPDATE wishlist_items SET user_id=$1 WHERE user_id IS NULL',[admin.id]);
   await pool.query(`CREATE INDEX IF NOT EXISTS wishlist_user_idx ON wishlist_items(user_id)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS wishlist_status_idx ON wishlist_items(user_id,status)`);
+  await pool.query(`
+    INSERT INTO price_history(item_id,user_id,price,source,recorded_at)
+    SELECT w.id,w.user_id,w.price,'baseline',COALESCE(w.updated_at,w.created_at,NOW())
+    FROM wishlist_items w
+    WHERE w.user_id IS NOT NULL AND w.price>0
+      AND NOT EXISTS (SELECT 1 FROM price_history ph WHERE ph.item_id=w.id)
+  `);
   await pool.query(`DELETE FROM sessions WHERE expires_at < NOW()`);
   await pool.query(`DELETE FROM password_reset_tokens WHERE expires_at < NOW() OR used_at IS NOT NULL`);
 }
@@ -271,11 +291,38 @@ async function requireAuth(req,res,next){ const u=await getSessionUser(req); if(
 function requireAdmin(req,res,next){ if(req.user?.role!=='admin')return res.status(403).json({error:'Доступ только для администратора.'}); next(); }
 
 function mapRow(r) {
-  return {id:r.id,title:r.title,url:r.url||'',image:r.image||'',store:r.store||'',storeDomain:r.store_domain||r.storeDomain||'',variant:r.variant||'',price:Number(r.price||0),saved:Number(r.saved||0),category:r.category||'Другое',priority:Number(r.priority||2),status:r.status||'want',note:r.note||'',createdAt:r.created_at||r.createdAt,updatedAt:r.updated_at||r.updatedAt,purchasedAt:r.purchased_at||r.purchasedAt};
+  const price=Number(r.price||0);
+  const previousRaw=r.previous_price ?? r.previousPrice;
+  const previousPrice=previousRaw===null||previousRaw===undefined?null:Number(previousRaw);
+  return {
+    id:r.id,title:r.title,url:r.url||'',image:r.image||'',store:r.store||'',storeDomain:r.store_domain||r.storeDomain||'',variant:r.variant||'',
+    price,saved:Number(r.saved||0),category:r.category||'Другое',priority:Number(r.priority||2),status:r.status||'want',note:r.note||'',
+    createdAt:r.created_at||r.createdAt,updatedAt:r.updated_at||r.updatedAt,purchasedAt:r.purchased_at||r.purchasedAt,
+    previousPrice:Number.isFinite(previousPrice)?previousPrice:null,
+    minPrice:Number((r.min_price ?? r.minPrice ?? price) || 0),
+    maxPrice:Number((r.max_price ?? r.maxPrice ?? price) || 0),
+    historyCount:Number(r.history_count ?? r.historyCount ?? 0)
+  };
 }
 function cleanItem(x={}) {
   const allowedStatus=new Set(['want','plan','ordered','bought','paused']);
   return {title:cleanShort(x.title,250),url:cleanShort(x.url,2000),image:cleanShort(x.image,4000),store:cleanShort(x.store,120),storeDomain:cleanShort(x.storeDomain,250),variant:cleanShort(x.variant,80),price:Math.max(0,Number(x.price||0)),saved:Math.max(0,Number(x.saved||0)),category:cleanShort(x.category||'Другое',80),priority:Math.min(4,Math.max(1,Number(x.priority||2))),status:allowedStatus.has(String(x.status))?String(x.status):'want',note:cleanShort(x.note,2000)};
+}
+
+async function recordPriceHistory(userId,itemId,price,source='manual') {
+  const value=Math.round(Math.max(0,Number(price||0))*100)/100;
+  if(!value) return false;
+  const safeSource=cleanShort(source||'manual',40)||'manual';
+  if(pool){
+    const last=await pool.query(`SELECT price FROM price_history WHERE item_id=$1 AND user_id=$2 ORDER BY recorded_at DESC,id DESC LIMIT 1`,[itemId,userId]);
+    if(last.rowCount && Math.abs(Number(last.rows[0].price)-value)<0.01) return false;
+    await pool.query(`INSERT INTO price_history(item_id,user_id,price,source) VALUES($1,$2,$3,$4)`,[itemId,userId,value,safeSource]);
+    return true;
+  }
+  const last=[...mem.priceHistory].reverse().find(x=>x.itemId===itemId&&x.userId===userId);
+  if(last && Math.abs(Number(last.price)-value)<0.01) return false;
+  mem.priceHistory.push({id:crypto.randomUUID(),itemId,userId,price:value,source:safeSource,recordedAt:new Date().toISOString()});
+  return true;
 }
 
 // ----- Public/auth endpoints -----
@@ -351,20 +398,69 @@ app.patch('/api/profile', requireAuth, async (req,res)=>{const name=cleanShort(r
 
 // ----- User-owned wishlist -----
 app.get('/api/items', requireAuth, async (req,res)=>{
-  if(!pool)return res.json(mem.items.filter(x=>x.userId===req.user.id));
-  const q=await pool.query(`SELECT * FROM wishlist_items WHERE user_id=$1 ORDER BY CASE WHEN status='bought' THEN 1 ELSE 0 END,priority DESC,created_at DESC`,[req.user.id]);res.json(q.rows.map(mapRow));
+  if(!pool){
+    const rows=mem.items.filter(x=>x.userId===req.user.id).map(item=>{
+      const entries=mem.priceHistory.filter(h=>h.userId===req.user.id&&h.itemId===item.id).sort((a,b)=>new Date(a.recordedAt)-new Date(b.recordedAt));
+      return {...item,...priceHistorySummary(entries,item.price)};
+    });
+    return res.json(rows);
+  }
+  const q=await pool.query(`
+    SELECT w.*,hs.history_count,hs.min_price,hs.max_price,prev.previous_price
+    FROM wishlist_items w
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*)::int history_count,MIN(price) min_price,MAX(price) max_price
+      FROM price_history ph WHERE ph.item_id=w.id AND ph.user_id=w.user_id
+    ) hs ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT ph.price previous_price FROM price_history ph
+      WHERE ph.item_id=w.id AND ph.user_id=w.user_id AND ABS(ph.price-w.price)>=0.01
+      ORDER BY ph.recorded_at DESC,ph.id DESC LIMIT 1
+    ) prev ON TRUE
+    WHERE w.user_id=$1
+    ORDER BY CASE WHEN w.status='bought' THEN 1 ELSE 0 END,w.priority DESC,w.created_at DESC
+  `,[req.user.id]);
+  res.json(q.rows.map(mapRow));
 });
 app.post('/api/items', requireAuth, async (req,res)=>{
   const x=cleanItem(req.body);if(!x.title)return res.status(400).json({error:'Укажи название товара.'});const id=crypto.randomUUID();
-  if(!pool){const now=new Date().toISOString();const item={id,userId:req.user.id,...x,createdAt:now,updatedAt:now,purchasedAt:x.status==='bought'?now:null};mem.items.unshift(item);return res.status(201).json(item);}
-  const q=await pool.query(`INSERT INTO wishlist_items(id,user_id,title,url,image,store,store_domain,variant,price,saved,category,priority,status,note,purchased_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,CASE WHEN $13='bought' THEN NOW() ELSE NULL END) RETURNING *`,[id,req.user.id,x.title,x.url,x.image,x.store,x.storeDomain,x.variant,x.price,x.saved,x.category,x.priority,x.status,x.note]);res.status(201).json(mapRow(q.rows[0]));
+  if(!pool){
+    const now=new Date().toISOString();const item={id,userId:req.user.id,...x,createdAt:now,updatedAt:now,purchasedAt:x.status==='bought'?now:null};mem.items.unshift(item);
+    await recordPriceHistory(req.user.id,id,x.price,'created');
+    return res.status(201).json({...item,...priceHistorySummary(mem.priceHistory.filter(h=>h.itemId===id),x.price)});
+  }
+  const q=await pool.query(`INSERT INTO wishlist_items(id,user_id,title,url,image,store,store_domain,variant,price,saved,category,priority,status,note,purchased_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,CASE WHEN $13='bought' THEN NOW() ELSE NULL END) RETURNING *`,[id,req.user.id,x.title,x.url,x.image,x.store,x.storeDomain,x.variant,x.price,x.saved,x.category,x.priority,x.status,x.note]);
+  await recordPriceHistory(req.user.id,id,x.price,'created');
+  res.status(201).json(mapRow(q.rows[0]));
 });
 app.put('/api/items/:id', requireAuth, async (req,res)=>{
   const x=cleanItem(req.body);if(!x.title)return res.status(400).json({error:'Укажи название товара.'});
-  if(!pool){const i=mem.items.findIndex(v=>v.id===req.params.id&&v.userId===req.user.id);if(i<0)return res.status(404).json({error:'Не найдено'});const was=mem.items[i].status==='bought';mem.items[i]={...mem.items[i],...x,updatedAt:new Date().toISOString(),purchasedAt:x.status==='bought'?(was?mem.items[i].purchasedAt:new Date().toISOString()):null};return res.json(mem.items[i]);}
-  const q=await pool.query(`UPDATE wishlist_items SET title=$3,url=$4,image=$5,store=$6,store_domain=$7,variant=$8,price=$9,saved=$10,category=$11,priority=$12,status=$13,note=$14,updated_at=NOW(),purchased_at=CASE WHEN $13='bought' THEN COALESCE(purchased_at,NOW()) ELSE NULL END WHERE id=$1 AND user_id=$2 RETURNING *`,[req.params.id,req.user.id,x.title,x.url,x.image,x.store,x.storeDomain,x.variant,x.price,x.saved,x.category,x.priority,x.status,x.note]);if(!q.rowCount)return res.status(404).json({error:'Не найдено'});res.json(mapRow(q.rows[0]));
+  if(!pool){
+    const i=mem.items.findIndex(v=>v.id===req.params.id&&v.userId===req.user.id);if(i<0)return res.status(404).json({error:'Не найдено'});
+    const was=mem.items[i].status==='bought';mem.items[i]={...mem.items[i],...x,updatedAt:new Date().toISOString(),purchasedAt:x.status==='bought'?(was?mem.items[i].purchasedAt:new Date().toISOString()):null};
+    await recordPriceHistory(req.user.id,req.params.id,x.price,'updated');
+    const entries=mem.priceHistory.filter(h=>h.itemId===req.params.id&&h.userId===req.user.id);
+    return res.json({...mem.items[i],...priceHistorySummary(entries,x.price)});
+  }
+  const q=await pool.query(`UPDATE wishlist_items SET title=$3,url=$4,image=$5,store=$6,store_domain=$7,variant=$8,price=$9,saved=$10,category=$11,priority=$12,status=$13,note=$14,updated_at=NOW(),purchased_at=CASE WHEN $13='bought' THEN COALESCE(purchased_at,NOW()) ELSE NULL END WHERE id=$1 AND user_id=$2 RETURNING *`,[req.params.id,req.user.id,x.title,x.url,x.image,x.store,x.storeDomain,x.variant,x.price,x.saved,x.category,x.priority,x.status,x.note]);
+  if(!q.rowCount)return res.status(404).json({error:'Не найдено'});
+  await recordPriceHistory(req.user.id,req.params.id,x.price,'updated');
+  res.json(mapRow(q.rows[0]));
 });
-app.delete('/api/items/:id', requireAuth, async (req,res)=>{if(!pool){const i=mem.items.findIndex(v=>v.id===req.params.id&&v.userId===req.user.id);if(i<0)return res.status(404).json({error:'Не найдено'});mem.items.splice(i,1);return res.json({ok:true});}const q=await pool.query('DELETE FROM wishlist_items WHERE id=$1 AND user_id=$2',[req.params.id,req.user.id]);if(!q.rowCount)return res.status(404).json({error:'Не найдено'});res.json({ok:true});});
+app.get('/api/items/:id/price-history', requireAuth, async (req,res)=>{
+  if(!pool){
+    const item=mem.items.find(v=>v.id===req.params.id&&v.userId===req.user.id);if(!item)return res.status(404).json({error:'Не найдено'});
+    const entries=mem.priceHistory.filter(h=>h.itemId===item.id&&h.userId===req.user.id).sort((a,b)=>new Date(a.recordedAt)-new Date(b.recordedAt)).slice(-120);
+    return res.json({itemId:item.id,entries,summary:priceHistorySummary(entries,item.price)});
+  }
+  const item=await pool.query(`SELECT id,price FROM wishlist_items WHERE id=$1 AND user_id=$2 LIMIT 1`,[req.params.id,req.user.id]);
+  if(!item.rowCount)return res.status(404).json({error:'Не найдено'});
+  const q=await pool.query(`SELECT id,price,source,recorded_at FROM (SELECT id,price,source,recorded_at FROM price_history WHERE item_id=$1 AND user_id=$2 ORDER BY recorded_at DESC,id DESC LIMIT 120) h ORDER BY recorded_at ASC,id ASC`,[req.params.id,req.user.id]);
+  const entries=q.rows.map(r=>({id:r.id,price:Number(r.price),source:r.source,recordedAt:r.recorded_at}));
+  res.json({itemId:req.params.id,entries,summary:priceHistorySummary(entries,Number(item.rows[0].price))});
+});
+
+app.delete('/api/items/:id', requireAuth, async (req,res)=>{if(!pool){const i=mem.items.findIndex(v=>v.id===req.params.id&&v.userId===req.user.id);if(i<0)return res.status(404).json({error:'Не найдено'});mem.items.splice(i,1);mem.priceHistory=mem.priceHistory.filter(h=>h.itemId!==req.params.id);return res.json({ok:true});}const q=await pool.query('DELETE FROM wishlist_items WHERE id=$1 AND user_id=$2',[req.params.id,req.user.id]);if(!q.rowCount)return res.status(404).json({error:'Не найдено'});res.json({ok:true});});
 
 // ----- Admin -----
 app.get('/api/admin/overview', requireAuth, requireAdmin, async (req,res)=>{
@@ -1183,7 +1279,7 @@ app.post('/api/product-preview', requireAuth, async (req, res) => {
 
 app.get('*', (req, res) => res.sendFile(`${process.cwd()}/public/index.html`));
 
-export { parseMakeupReaderMarkdown, parseMakeupSearchHtml, parseMakeupSearchText, rankMakeupImages, makeupImageScore };
+export { parseMakeupReaderMarkdown, parseMakeupSearchHtml, parseMakeupSearchText, rankMakeupImages, makeupImageScore, priceHistorySummary };
 
 if (process.env.HOCHU_TEST !== '1') {
   initDb().then(() => {
