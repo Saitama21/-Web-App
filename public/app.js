@@ -29,7 +29,7 @@ const params = new URLSearchParams(location.search);
 const state = {
   items: [], view: 'home', homeStatus: 'all', theme: localStorage.getItem('hochu-theme') || 'system',
   me: null, inviteToken: params.get('invite') || '', resetToken: params.get('reset') || '',
-  version:'1.3.1', aiInspector:null, admin: { overview:null, users:[], requests:[], resets:[] }
+  version:'1.3.2', aiInspector:null, admin: { overview:null, users:[], requests:[], resets:[] }
 };
 
 const els = {
@@ -43,7 +43,7 @@ const els = {
   categoryGrid:$('categoryGrid'), storesGrid:$('storesGrid'), storeCountBadge:$('storeCountBadge'),
   aTotal:$('aTotal'), aSaved:$('aSaved'), aLeft:$('aLeft'), aBought:$('aBought'), aTotalBar:$('aTotalBar'), aSavedBar:$('aSavedBar'), aLeftBar:$('aLeftBar'), aBoughtBar:$('aBoughtBar'), categoryProgress:$('categoryProgress'),
   profileName:$('profileName'), profileAvatar:$('profileAvatar'), profileRole:$('profileRole'), appVersionBadge:$('appVersionBadge'), mobileVersionBadge:$('mobileVersionBadge'), profileAvatarPreview:$('profileAvatarPreview'), avatarFile:$('avatarFile'), chooseAvatar:$('chooseAvatar'), removeAvatar:$('removeAvatar'), avatarMessage:$('avatarMessage'), nameSetting:$('nameSetting'), accountSetting:$('accountSetting'), saveName:$('saveName'), logoutButton:$('logoutButton'), mobileAdd:$('mobileAdd'), mobileNav:$('mobileNav'),
-  aiInspectorStatus:$('aiInspectorStatus'), aiInspectorModel:$('aiInspectorModel'), openInstallGuide:$('openInstallGuide'), installGuideDialog:$('installGuideDialog'), installGuideClose:$('installGuideClose'), installGuideDone:$('installGuideDone'), installStatus:$('installStatus'), installNow:$('installNow'),
+  aiInspectorStatus:$('aiInspectorStatus'), aiInspectorModel:$('aiInspectorModel'), aiInspectorDetail:$('aiInspectorDetail'), checkAiInspector:$('checkAiInspector'), openInstallGuide:$('openInstallGuide'), installGuideDialog:$('installGuideDialog'), installGuideClose:$('installGuideClose'), installGuideDone:$('installGuideDone'), installStatus:$('installStatus'), installNow:$('installNow'),
   editor:$('editorDialog'), editorForm:$('editorForm'), editorTitle:$('editorTitle'), editorClose:$('editorClose'), cancelEditor:$('cancelEditor'), deleteItem:$('deleteItem'),
   itemId:$('itemId'), urlInput:$('urlInput'), fetchPreview:$('fetchPreview'), fetchMessage:$('fetchMessage'), titleInput:$('titleInput'), priceInput:$('priceInput'), savedInput:$('savedInput'), categoryInput:$('categoryInput'), priorityInput:$('priorityInput'), statusInput:$('statusInput'), storeInput:$('storeInput'), variantInput:$('variantInput'), imageInput:$('imageInput'), noteInput:$('noteInput'),
   originalPriceInput:$('originalPriceInput'), discountAmountInput:$('discountAmountInput'), priceVerificationStatusInput:$('priceVerificationStatusInput'), priceVerificationSourceInput:$('priceVerificationSourceInput'), priceCheckedAtInput:$('priceCheckedAtInput'), priceVerificationHint:$('priceVerificationHint'),
@@ -201,7 +201,7 @@ function updateProfile(){
   const u=state.me; if(!u)return;
   els.profileName.textContent=u.name||u.username; setAvatarElement(els.profileAvatar,u); setAvatarElement(els.profileAvatarPreview,u);
   els.profileRole.textContent=u.role==='admin'?'администратор':'личный журнал'; els.nameSetting.value=u.name||''; els.accountSetting.value=`${u.username} · ${u.email}`;
-  if(els.appVersionBadge) els.appVersionBadge.textContent=`v${state.version||'1.3.1'}`; if(els.mobileVersionBadge) els.mobileVersionBadge.textContent=`v${state.version||'1.3.1'}`;
+  if(els.appVersionBadge) els.appVersionBadge.textContent=`v${state.version||'1.3.2'}`; if(els.mobileVersionBadge) els.mobileVersionBadge.textContent=`v${state.version||'1.3.2'}`;
   els.removeAvatar?.classList.toggle('hidden',!safeAvatarData(u.avatar));
   els.adminNavItem.classList.toggle('hidden',u.role!=='admin'); els.adminSettingsCard.classList.toggle('hidden',u.role!=='admin');
 }
@@ -210,10 +210,22 @@ function updateProfile(){
 function updateAiInspectorStatus(info={}){
   state.aiInspector=info||{};
   if(!els.aiInspectorStatus)return;
-  const enabled=Boolean(info?.configured); const model=info?.model||'gpt-5-mini'; const fallback=info?.fallbackModel||'';
-  els.aiInspectorStatus.className=`ai-status ${enabled?'active':'inactive'}`;
-  els.aiInspectorStatus.textContent=enabled?'Подключён ✓':'Не настроен';
+  const enabled=Boolean(info?.configured),status=enabled?String(info?.state||'configured'):'disabled';
+  const model=info?.model||'gpt-5-mini',fallback=info?.fallbackModel||'';
+  const labels={
+    disabled:['inactive','Выключен'],configured:['checking','Настроен · не проверен'],authorized:['active','Ключ и модели доступны'],working:['active','Работает ✓'],cached:['active','Работает · кэш'],
+    quota_exhausted:['error','Лимит API исчерпан'],rate_limited:['warning','Временное ограничение'],budget_exhausted:['warning','Дневной лимит достигнут'],invalid_key:['error','Ошибка API-ключа'],
+    model_unavailable:['error','Модель недоступна'],access_denied:['error','Нет доступа к модели'],api_unavailable:['warning','OpenAI временно недоступен'],api_error:['error','Ошибка OpenAI API'],timeout:['warning','Тайм-аут API'],network_error:['warning','Нет связи с API']
+  };
+  const [kind,label]=labels[status]||['checking','Статус неизвестен'];
+  els.aiInspectorStatus.className=`ai-status ${kind}`;
+  els.aiInspectorStatus.textContent=label;
   if(els.aiInspectorModel)els.aiInspectorModel.textContent=enabled?(fallback&&fallback!==model?`${model} · fallback ${fallback}`:model):'Добавь OPENAI_API_KEY в Railway Variables';
+  if(els.aiInspectorDetail){
+    const usage=enabled&&Number.isFinite(Number(info?.dailyLimit))?` Вызовы сегодня: ${Number(info.callsToday||0)}/${Number(info.dailyLimit||0)}.`:'';
+    const free=info?.tokenFree?' AI для этой карточки не вызывался.':'';
+    els.aiInspectorDetail.textContent=`${info?.message||''}${usage}${free}`.trim()||'Статус API ещё не проверен.';
+  }
 }
 
 async function boot(){
@@ -351,9 +363,9 @@ function setPriceVerification(data={}){
     }else if(v.status==='SALE_PAIR'&&original>current){
       els.priceVerificationHint.className='price-verification-hint sale-pair';
       els.priceVerificationHint.textContent=`Старая цена ${money(original)}; скидка ${money(discount||original-current)} рассчитана автоматически.`;
-    }else if(v.status==='CONFLICT'){
+    }else if(v.status==='CONFLICT'||v.status==='UNVERIFIED_TOUCH'){
       els.priceVerificationHint.className='price-verification-hint conflict';
-      els.priceVerificationHint.textContent='⚠ Найден конфликт цен. Проверь цену на сайте перед сохранением.';
+      els.priceVerificationHint.textContent=v.status==='UNVERIFIED_TOUCH'?'⚠ Touch не подтвердил текущую цену. Старая цена заблокирована — проверь и введи цену вручную.':'⚠ Найден конфликт цен. Проверь цену на сайте перед сохранением.';
     }else{
       els.priceVerificationHint.textContent='';els.priceVerificationHint.className='price-verification-hint hidden';
     }
@@ -506,6 +518,12 @@ els.avatarFile.onchange=async()=>{
   try{const avatar=await prepareAvatar(file);els.avatarMessage.textContent='Сохраняю…';const d=await api('/api/profile/avatar',{method:'PATCH',body:JSON.stringify({avatar})});state.me=d.user;updateProfile();els.avatarMessage.textContent='Аватар обновлён ✓';if(state.me?.role==='admin')loadAdmin().catch(()=>{});}catch(err){els.avatarMessage.textContent=err.message||'Не удалось загрузить аватар.';}finally{els.chooseAvatar.disabled=false;els.avatarFile.value='';}
 };
 els.removeAvatar.onclick=async()=>{if(!confirm('Удалить аватар профиля?'))return;els.avatarMessage.textContent='Удаляю…';try{const d=await api('/api/profile/avatar',{method:'PATCH',body:JSON.stringify({avatar:''})});state.me=d.user;updateProfile();els.avatarMessage.textContent='Аватар удалён.';if(state.me?.role==='admin')loadAdmin().catch(()=>{});}catch(err){els.avatarMessage.textContent=err.message||'Не удалось удалить аватар.';}};
+els.checkAiInspector.onclick=async()=>{
+  els.checkAiInspector.disabled=true;els.checkAiInspector.textContent='Проверяю…';
+  try{const info=await api('/api/ai-inspector/check',{method:'POST'});updateAiInspectorStatus(info)}
+  catch(err){updateAiInspectorStatus({...(state.aiInspector||{}),state:'api_error',message:err.message||'Проверка API не выполнена.'})}
+  finally{els.checkAiInspector.disabled=false;els.checkAiInspector.textContent='Проверить API без токенов'}
+};
 
 els.openInstallGuide.onclick=openInstallHelp;
 els.installGuideClose.onclick=els.installGuideDone.onclick=()=>els.installGuideDialog.close();
@@ -540,7 +558,8 @@ els.fetchPreview.onclick=async()=>{
   try{
     const d=await api('/api/product-preview',{method:'POST',body:JSON.stringify({url})});
     if(d.title) els.titleInput.value=d.title;
-    if(d.price) els.priceInput.value=d.price;
+    if(d.priceReliable===false)els.priceInput.value='';
+    else if(d.price) els.priceInput.value=d.price;
     setPriceVerification(d);
     if(d.store) els.storeInput.value=d.store;
     if(d.variant) els.variantInput.value=d.variant;
@@ -548,7 +567,9 @@ els.fetchPreview.onclick=async()=>{
     if(d.category) els.categoryInput.value=d.category;
     if(d.canonicalUrl) els.urlInput.value=d.canonicalUrl;
     els.fetchMessage.textContent=d.message || (d.quality==='partial'?'Получены не все данные — проверь поля.':d.quality==='none'?'Не удалось получить данные автоматически. Заполни поля вручную.':'Готово. Проверь данные перед сохранением.');
-    if(d.inspector?.configured&&!d.inspector?.used&&d.quality!=='none') els.fetchMessage.title=`AI-инспектор ${d.inspector.model} подключён; бесплатный парсер/арифметика уже дали уверенный результат или инспектор не изменил выбор.`;
+    if(d.inspector?.tokenFree)els.fetchMessage.title='Цена обработана бесплатным парсером; OpenAI API для этой карточки не вызывался.';
+    else if(d.inspector?.failed)els.fetchMessage.title=d.inspector.message||'AI-инспектор не выполнил проверку.';
+    else els.fetchMessage.title='';
     if(d.inspector) updateAiInspectorStatus(d.inspector);
     els.fetchPreview.textContent=d.quality==='none'?'✦ Подтянуть':'✦ Подтянуть снова';
     updatePreview();
@@ -586,7 +607,7 @@ window.addEventListener('appinstalled',()=>{deferredInstallPrompt=null;updateIns
 if('serviceWorker' in navigator){
   window.addEventListener('load',async()=>{
     try{
-      const reg=await navigator.serviceWorker.register('/sw.js?v=1.3.1',{updateViaCache:'none'});
+      const reg=await navigator.serviceWorker.register('/sw.js?v=1.3.2',{updateViaCache:'none'});
       await reg.update();
     }catch{}
   });

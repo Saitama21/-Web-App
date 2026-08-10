@@ -7,15 +7,19 @@ import { priceHistorySummary } from './lib/price-history.js';
 import { extractInspectorVariantCandidates, applyInspectorDecision, inspectorEnum } from './lib/product-inspector.js';
 import { validatePriceArithmetic, pickBestPriceFact, candidatePriceRole } from './lib/price-validator.js';
 
+function envNumber(name,fallback){const raw=process.env[name];if(raw===undefined||raw==='')return fallback;const n=Number(raw);return Number.isFinite(n)?n:fallback;}
+
 const { Pool } = pg;
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
-const VERSION = '1.3.1';
+const VERSION = '1.3.2';
 const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '').trim();
 const AI_INSPECTOR_MODEL = String(process.env.AI_INSPECTOR_MODEL || 'gpt-5-mini').trim() || 'gpt-5-mini';
 const AI_INSPECTOR_FALLBACK_MODEL = String(process.env.AI_INSPECTOR_FALLBACK_MODEL || 'gpt-5.6-terra').trim() || 'gpt-5.6-terra';
 const AI_INSPECTOR_ENABLED = Boolean(OPENAI_API_KEY) && !/^(?:0|false|off|no)$/i.test(String(process.env.AI_INSPECTOR_ENABLED || 'true'));
-const AI_INSPECTOR_MAX_IMAGES = Math.max(0, Math.min(5, Number(process.env.AI_INSPECTOR_MAX_IMAGES || 4) || 4));
+const AI_INSPECTOR_MAX_IMAGES = Math.max(0, Math.min(2, envNumber('AI_INSPECTOR_MAX_IMAGES',2)));
+const AI_INSPECTOR_DAILY_LIMIT = Math.max(0, Math.min(500, envNumber('AI_INSPECTOR_DAILY_LIMIT',8)));
+const AI_INSPECTOR_CACHE_TTL_MS = Math.max(60_000, Math.min(24*60*60_000, envNumber('AI_INSPECTOR_CACHE_MINUTES',60)*60_000));
 const DATABASE_URL = String(process.env.DATABASE_URL || '');
 const LEGACY_APP_PASSWORD = String(process.env.APP_PASSWORD || '');
 const ADMIN_EMAIL = normalizeEmail(process.env.ADMIN_EMAIL || 'admin@hochu.local');
@@ -84,6 +88,15 @@ app.use('/api', (req,res,next) => {
 });
 
 const rate = new Map();
+const aiDecisionCache = new Map();
+let memoryAiUsage = { date:'', calls:0 };
+const aiRuntime = {
+  state: AI_INSPECTOR_ENABLED ? 'configured' : 'disabled',
+  message: AI_INSPECTOR_ENABLED ? 'Ключ настроен; API ещё не проверялся.' : 'AI-инспектор выключен.',
+  lastCheckedAt: null,
+  lastSuccessAt: null,
+  lastErrorCode: ''
+};
 function rateLimit(bucket, max=12, windowMs=60_000) {
   return (req,res,next) => {
     const key=`${bucket}:${req.ip}`; const now=Date.now();
@@ -231,6 +244,13 @@ async function initDb() {
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS price_history_item_idx ON price_history(item_id,recorded_at)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS price_history_user_idx ON price_history(user_id,recorded_at)`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ai_usage_daily (
+      usage_date DATE PRIMARY KEY,
+      calls INTEGER NOT NULL DEFAULT 0,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
   const admin = await ensureDbAdmin();
   if (admin) await pool.query('UPDATE wishlist_items SET user_id=$1 WHERE user_id IS NULL',[admin.id]);
   await pool.query(`CREATE INDEX IF NOT EXISTS wishlist_user_idx ON wishlist_items(user_id)`);
@@ -355,7 +375,19 @@ async function recordPriceHistory(userId,itemId,price,source='manual') {
 app.get('/api/health', async (req,res)=>{
   let database='memory'; if(pool){try{await pool.query('SELECT 1');database='postgresql'}catch{database='error'}}
   let adminReady=Boolean(ADMIN_PASSWORD); if(pool){const q=await pool.query(`SELECT 1 FROM users WHERE role='admin' LIMIT 1`);adminReady=Boolean(q.rowCount)}
-  res.json({ok:true,app:'Хочу',version:VERSION,database,adminReady,aiInspector:{configured:AI_INSPECTOR_ENABLED,model:AI_INSPECTOR_MODEL,fallbackModel:AI_INSPECTOR_FALLBACK_MODEL}});
+  res.json({ok:true,app:'Хочу',version:VERSION,database,adminReady,aiInspector:await aiStatusSnapshot()});
+});
+app.post('/api/ai-inspector/check', requireAuth, rateLimit('ai-check',3,5*60_000), async (req,res)=>{
+  if(!AI_INSPECTOR_ENABLED)return res.status(400).json(await aiStatusSnapshot());
+  const models=[AI_INSPECTOR_MODEL];
+  if(AI_INSPECTOR_FALLBACK_MODEL&&AI_INSPECTOR_FALLBACK_MODEL!==AI_INSPECTOR_MODEL)models.push(AI_INSPECTOR_FALLBACK_MODEL);
+  const checks=await Promise.all(models.map(probeAiModelAccess));
+  const primary=checks[0],fallback=checks[1]||null;
+  if(primary.ok){
+    const suffix=fallback&&!fallback.ok?` Основная модель доступна, fallback недоступен: ${fallback.message}`:' Ключ и модели доступны.';
+    markAiRuntime('authorized',`Бесплатная проверка выполнена.${suffix}`,'');
+  }else markAiRuntime(primary.state,primary.message,primary.code||primary.state);
+  res.json(await aiStatusSnapshot({probe:{primary,fallback},generationQuotaChecked:false}));
 });
 app.get('/api/me', async (req,res)=>{ const u=await getSessionUser(req); res.json({authenticated:Boolean(u),user:safeUser(u),version:VERSION}); });
 app.post('/api/login', rateLimit('login',10,60_000), async (req,res)=>{
@@ -1659,6 +1691,113 @@ function buildAiInspectorEvidence(result={}, pageUrl='', domain='') {
   const variants=extractInspectorVariantCandidates(texts,result.variant);
   return {pageUrl,title:usableTitle(result.title),domain,images,prices,variants,priceVerification:result.priceVerification||null};
 }
+function aiUsageDate() { return new Date().toISOString().slice(0,10); }
+function markAiRuntime(state,message='',errorCode='') {
+  aiRuntime.state=state;
+  aiRuntime.message=cleanText(message).slice(0,220);
+  aiRuntime.lastCheckedAt=new Date().toISOString();
+  aiRuntime.lastErrorCode=cleanShort(errorCode,80);
+  if(state==='working'||state==='authorized') aiRuntime.lastSuccessAt=aiRuntime.lastCheckedAt;
+}
+function classifyOpenAiFailure(status=0,raw='') {
+  let payload={};
+  try { payload=typeof raw==='string'?JSON.parse(raw):raw||{}; } catch {}
+  const apiCode=cleanShort(payload?.error?.code||payload?.code||'',80).toLowerCase();
+  const apiType=cleanShort(payload?.error?.type||payload?.type||'',80).toLowerCase();
+  const hay=`${apiCode} ${apiType} ${cleanText(payload?.error?.message||payload?.message||'')}`.toLowerCase();
+  if(status===401||/invalid_api_key|incorrect api key|authentication/.test(hay)) return {state:'invalid_key',code:apiCode||'invalid_api_key',message:'API-ключ отклонён. Проверь OPENAI_API_KEY в Railway.'};
+  if(status===429&&/insufficient_quota|quota|billing|credit|balance/.test(hay)) return {state:'quota_exhausted',code:apiCode||'insufficient_quota',message:'Лимит или баланс OpenAI API исчерпан.'};
+  if(status===429) return {state:'rate_limited',code:apiCode||'rate_limit_exceeded',message:'OpenAI временно ограничил частоту запросов.'};
+  if(status===404||/model_not_found/.test(hay)) return {state:'model_unavailable',code:apiCode||'model_not_found',message:'Указанная модель недоступна этому API-проекту.'};
+  if(status===403) return {state:'access_denied',code:apiCode||'access_denied',message:'API-проект не имеет доступа к модели.'};
+  if(status>=500) return {state:'api_unavailable',code:apiCode||`http_${status}`,message:'OpenAI API временно недоступен.'};
+  return {state:'api_error',code:apiCode||`http_${status||0}`,message:'OpenAI API вернул ошибку. Подробности записаны в Railway Console.'};
+}
+async function getAiCallsToday() {
+  if(!AI_INSPECTOR_ENABLED)return 0;
+  if(pool){
+    try { const q=await pool.query('SELECT calls FROM ai_usage_daily WHERE usage_date=CURRENT_DATE'); return Number(q.rows[0]?.calls||0); }
+    catch { return 0; }
+  }
+  const date=aiUsageDate();
+  if(memoryAiUsage.date!==date) memoryAiUsage={date,calls:0};
+  return memoryAiUsage.calls;
+}
+async function claimAiCall() {
+  if(!AI_INSPECTOR_ENABLED)return {allowed:false,calls:0,state:'disabled'};
+  if(AI_INSPECTOR_DAILY_LIMIT<=0)return {allowed:false,calls:0,state:'budget_exhausted'};
+  if(pool){
+    try {
+      const q=await pool.query(`
+        INSERT INTO ai_usage_daily(usage_date,calls,updated_at) VALUES(CURRENT_DATE,1,NOW())
+        ON CONFLICT (usage_date) DO UPDATE SET calls=ai_usage_daily.calls+1,updated_at=NOW()
+        WHERE ai_usage_daily.calls < $1
+        RETURNING calls
+      `,[AI_INSPECTOR_DAILY_LIMIT]);
+      if(q.rowCount)return {allowed:true,calls:Number(q.rows[0].calls),state:'claimed'};
+      return {allowed:false,calls:await getAiCallsToday(),state:'budget_exhausted'};
+    } catch(err) {
+      console.warn('AI usage limiter database fallback:',cleanText(err?.message||err).slice(0,180));
+    }
+  }
+  const date=aiUsageDate();
+  if(memoryAiUsage.date!==date) memoryAiUsage={date,calls:0};
+  if(memoryAiUsage.calls>=AI_INSPECTOR_DAILY_LIMIT)return {allowed:false,calls:memoryAiUsage.calls,state:'budget_exhausted'};
+  memoryAiUsage.calls+=1;
+  return {allowed:true,calls:memoryAiUsage.calls,state:'claimed'};
+}
+async function aiStatusSnapshot(extra={}) {
+  const callsToday=await getAiCallsToday();
+  return {
+    configured:AI_INSPECTOR_ENABLED,
+    state:AI_INSPECTOR_ENABLED?aiRuntime.state:'disabled',
+    message:AI_INSPECTOR_ENABLED?aiRuntime.message:'AI-инспектор выключен.',
+    model:AI_INSPECTOR_MODEL,
+    fallbackModel:AI_INSPECTOR_FALLBACK_MODEL,
+    dailyLimit:AI_INSPECTOR_DAILY_LIMIT,
+    callsToday,
+    remainingToday:Math.max(0,AI_INSPECTOR_DAILY_LIMIT-callsToday),
+    lastCheckedAt:aiRuntime.lastCheckedAt,
+    lastSuccessAt:aiRuntime.lastSuccessAt,
+    lastErrorCode:aiRuntime.lastErrorCode,
+    ...extra
+  };
+}
+async function probeAiModelAccess(model='') {
+  if(!AI_INSPECTOR_ENABLED)return {ok:false,model,state:'disabled',message:'AI-инспектор выключен.'};
+  try {
+    const r=await fetch(`https://api.openai.com/v1/models/${encodeURIComponent(model)}`,{
+      headers:{authorization:`Bearer ${OPENAI_API_KEY}`},signal:AbortSignal.timeout(12000)
+    });
+    if(!r.ok){
+      const raw=await r.text().catch(()=>String(r.status));
+      const failure=classifyOpenAiFailure(r.status,raw);
+      return {ok:false,model,...failure};
+    }
+    return {ok:true,model,state:'authorized',message:'Ключ принят, модель доступна. Проверка не расходует токены генерации.'};
+  } catch(err) {
+    const state=err?.name==='TimeoutError'?'timeout':'network_error';
+    return {ok:false,model,state,code:state,message:state==='timeout'?'OpenAI API не ответил вовремя.':'Не удалось связаться с OpenAI API.'};
+  }
+}
+function aiEvidenceCacheKey(model,evidence={}) {
+  const stable={model,pageUrl:evidence.pageUrl,title:evidence.title,domain:evidence.domain,priceVerification:evidence.priceVerification,
+    images:(evidence.images||[]).map(x=>[x.url,x.score,x.sourceType]),prices:evidence.prices||[],variants:evidence.variants||[]};
+  return crypto.createHash('sha256').update(JSON.stringify(stable)).digest('hex');
+}
+function cachedAiDecision(key='') {
+  const hit=aiDecisionCache.get(key);
+  if(!hit)return null;
+  if(Date.now()-hit.createdAt>AI_INSPECTOR_CACHE_TTL_MS){aiDecisionCache.delete(key);return null;}
+  return hit.decision;
+}
+function storeAiDecision(key,decision) {
+  if(key&&decision)aiDecisionCache.set(key,{decision,createdAt:Date.now()});
+  if(aiDecisionCache.size>250){
+    const oldest=[...aiDecisionCache.entries()].sort((a,b)=>a[1].createdAt-b[1].createdAt).slice(0,50);
+    for(const [k] of oldest)aiDecisionCache.delete(k);
+  }
+}
 function inspectorImageMime(contentType='',url='') {
   const ct=String(contentType||'').split(';')[0].trim().toLowerCase();
   if(['image/jpeg','image/png','image/webp','image/gif'].includes(ct)) return ct;
@@ -1686,7 +1825,15 @@ function extractOpenAIOutputText(payload={}) {
   return '';
 }
 async function callAiProductInspector(evidence={},model=AI_INSPECTOR_MODEL) {
-  if(!AI_INSPECTOR_ENABLED)return null;
+  if(!AI_INSPECTOR_ENABLED)return {decision:null,state:'disabled',cacheHit:false};
+  const cacheKey=aiEvidenceCacheKey(model,evidence);
+  const cached=cachedAiDecision(cacheKey);
+  if(cached)return {decision:cached,state:'cached',cacheHit:true};
+  const budget=await claimAiCall();
+  if(!budget.allowed){
+    markAiRuntime('budget_exhausted',`Достигнут локальный дневной лимит: ${AI_INSPECTOR_DAILY_LIMIT} AI-вызовов.`,'local_daily_limit');
+    return {decision:null,state:'budget_exhausted',cacheHit:false};
+  }
   const imageEnum=inspectorEnum(evidence.images?.length||0),priceEnum=inspectorEnum(evidence.prices?.length||0),variantEnum=inspectorEnum(evidence.variants?.length||0);
   const schema={type:'object',additionalProperties:false,properties:{image_index:{type:'integer',enum:imageEnum},price_index:{type:'integer',enum:priceEnum},variant_index:{type:'integer',enum:variantEnum},price_verdict:{type:'string',enum:['CONFIRM','CONFLICT','UNKNOWN']},confidence:{type:'number',minimum:0,maximum:1},reason:{type:'string'}},required:['image_index','price_index','variant_index','price_verdict','confidence','reason']};
   const compact={page_url:evidence.pageUrl,title:evidence.title,domain:evidence.domain,
@@ -1708,28 +1855,55 @@ async function callAiProductInspector(evidence={},model=AI_INSPECTOR_MODEL) {
     ],text:{format:{type:'json_schema',name:'product_inspection',strict:true,schema}}};
   try {
     const r=await fetch('https://api.openai.com/v1/responses',{method:'POST',headers:{authorization:`Bearer ${OPENAI_API_KEY}`,'content-type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(26000)});
-    if(!r.ok){const err=await r.text().catch(()=>String(r.status));console.warn(`AI inspector ${model} HTTP ${r.status}:`,err.slice(0,500));return null;}
-    const data=await r.json(); const text=extractOpenAIOutputText(data); if(!text)return null;
-    return JSON.parse(text);
-  } catch(err){console.warn(`AI inspector ${model} failed:`,err?.message||err);return null;}
+    if(!r.ok){
+      const raw=await r.text().catch(()=>String(r.status));
+      const failure=classifyOpenAiFailure(r.status,raw);
+      markAiRuntime(failure.state,failure.message,failure.code);
+      console.warn(`AI inspector ${model} HTTP ${r.status}: ${failure.code}`);
+      return {decision:null,state:failure.state,errorCode:failure.code,cacheHit:false};
+    }
+    const data=await r.json(); const text=extractOpenAIOutputText(data);
+    if(!text){markAiRuntime('api_error','OpenAI API не вернул структурированный ответ.','empty_output');return {decision:null,state:'api_error',errorCode:'empty_output',cacheHit:false};}
+    const decision=JSON.parse(text);
+    storeAiDecision(cacheKey,decision);
+    markAiRuntime('working',`API отвечает; ${model} успешно выполнил проверку.`,'');
+    return {decision,state:'working',cacheHit:false,usage:data?.usage||null};
+  } catch(err){
+    const code=err?.name==='TimeoutError'?'timeout':'network_error';
+    const message=code==='timeout'?'OpenAI API не ответил вовремя.':'Не удалось связаться с OpenAI API.';
+    markAiRuntime(code,message,code);
+    console.warn(`AI inspector ${model} failed: ${code}`);
+    return {decision:null,state:code,errorCode:code,cacheHit:false};
+  }
 }
 
+function eligibleCurrentPrices(evidence={}) {
+  return [...new Set((evidence.prices||[])
+    .filter(x=>!['old','discount'].includes(String(x.role||'').toLowerCase()))
+    .map(x=>numericPrice(x.value)).filter(Boolean).map(x=>Number(x).toFixed(2)))];
+}
 function shouldRunAiProductInspector(result={},evidence={},domain='') {
-  if(domain==='makeup.com.ua')return true; // known anti-bot/variant ambiguity
-  if(!STORE_CONFIG[domain])return true; // unknown stores benefit most from a second opinion
+  const verified=result.priceVerification?.status==='VERIFIED';
+  const safeImage=Boolean(result.image)&&!productImageNegative(result.image);
+  if(domain==='touch.com.ua')return false; // price must come from Touch page evidence, never paid AI guessing
+  if(verified&&safeImage)return false; // deterministic arithmetic wins and costs zero tokens
   if(!numericPrice(result.price)||!result.image||productImageNegative(result.image))return true;
-  const distinctPrices=[...new Set((evidence.prices||[]).map(x=>Number(x.value).toFixed(2)))];
+  const distinctPrices=eligibleCurrentPrices(evidence);
   if(distinctPrices.length>1)return true;
   const imgs=evidence.images||[];
   if(imgs.length>1&&Math.abs(Number(imgs[0].score||0)-Number(imgs[1].score||0))<30)return true;
   if(!cleanText(result.variant)&&(evidence.variants||[]).length)return true;
+  if(domain==='makeup.com.ua'&&!cleanText(result.variant))return true;
   return false;
 }
 async function inspectProductWithAi(result={},pageUrl='',domain='') {
-  if(!AI_INSPECTOR_ENABLED)return result;
+  if(!AI_INSPECTOR_ENABLED)return {...result,aiInspector:await aiStatusSnapshot({used:false,skipped:true,skipReason:'disabled',tokenFree:true})};
   const evidence=buildAiInspectorEvidence(result,pageUrl,domain);
-  if(!evidence.images.length&&!evidence.prices.length&&!evidence.variants.length)return result;
-  if(!shouldRunAiProductInspector(result,evidence,domain))return {...result,aiInspector:{used:false,configured:true,model:AI_INSPECTOR_MODEL,fallbackModel:AI_INSPECTOR_FALLBACK_MODEL,skipped:true,priceLocked:result.priceVerification?.status==='VERIFIED'}};
+  if(!evidence.images.length&&!evidence.prices.length&&!evidence.variants.length)return {...result,aiInspector:await aiStatusSnapshot({used:false,skipped:true,skipReason:'no-evidence',tokenFree:true})};
+  if(!shouldRunAiProductInspector(result,evidence,domain)){
+    const reason=result.priceVerification?.status==='VERIFIED'?'verified-free':domain==='touch.com.ua'?'touch-free-only':'not-needed';
+    return {...result,aiInspector:await aiStatusSnapshot({used:false,skipped:true,skipReason:reason,tokenFree:true,priceLocked:result.priceVerification?.status==='VERIFIED'})};
+  }
 
   const facts={currentPrice:result.price,originalPrice:result.originalPrice,discountAmount:result.discountAmount};
   const evaluate=(decision)=>{
@@ -1746,18 +1920,20 @@ async function inspectProductWithAi(result={},pageUrl='',domain='') {
     return {safeDecision:{...decision,price_index:Number.isInteger(safePrice)?safePrice:-1},priceConflict,priceRole:role,matchesCurrent:Boolean(matchesCurrent)};
   };
 
-  const primary=await callAiProductInspector(evidence,AI_INSPECTOR_MODEL);
-  if(!primary)return {...result,aiInspector:{used:false,configured:true,model:AI_INSPECTOR_MODEL,fallbackModel:AI_INSPECTOR_FALLBACK_MODEL,priceLocked:result.priceVerification?.status==='VERIFIED'}};
-  let chosen=primary,chosenModel=AI_INSPECTOR_MODEL,evalResult=evaluate(primary),fallbackUsed=false;
+  const primaryCall=await callAiProductInspector(evidence,AI_INSPECTOR_MODEL);
+  const primary=primaryCall.decision;
+  if(!primary)return {...result,aiInspector:await aiStatusSnapshot({used:false,skipped:false,failed:true,requestState:primaryCall.state,priceLocked:result.priceVerification?.status==='VERIFIED'})};
+  let chosen=primary,chosenModel=AI_INSPECTOR_MODEL,evalResult=evaluate(primary),fallbackUsed=false,cacheHit=primaryCall.cacheHit;
 
-  const distinctPrices=[...new Set((evidence.prices||[]).filter(x=>x.role!=='old'&&x.role!=='discount').map(x=>Number(x.value).toFixed(2)))];
+  const distinctPrices=eligibleCurrentPrices(evidence);
   const needsFallback=evalResult.priceConflict || (primary.price_verdict==='UNKNOWN'&&distinctPrices.length>1);
-  if(needsFallback&&AI_INSPECTOR_FALLBACK_MODEL&&AI_INSPECTOR_FALLBACK_MODEL!==AI_INSPECTOR_MODEL){
-    const fallback=await callAiProductInspector(evidence,AI_INSPECTOR_FALLBACK_MODEL);
+  if(needsFallback&&distinctPrices.length>1&&AI_INSPECTOR_FALLBACK_MODEL&&AI_INSPECTOR_FALLBACK_MODEL!==AI_INSPECTOR_MODEL){
+    const fallbackCall=await callAiProductInspector(evidence,AI_INSPECTOR_FALLBACK_MODEL);
+    const fallback=fallbackCall.decision;
     if(fallback){
       const fallbackEval=evaluate(fallback);
       // Prefer fallback only if it does not select a forbidden/contradictory price.
-      if(!fallbackEval.priceConflict){chosen=fallback;chosenModel=AI_INSPECTOR_FALLBACK_MODEL;evalResult=fallbackEval;fallbackUsed=true;}
+      if(!fallbackEval.priceConflict){chosen=fallback;chosenModel=AI_INSPECTOR_FALLBACK_MODEL;evalResult=fallbackEval;fallbackUsed=true;cacheHit=fallbackCall.cacheHit;}
     }
   }
 
@@ -1765,7 +1941,7 @@ async function inspectProductWithAi(result={},pageUrl='',domain='') {
   // A VERIFIED deterministic price is immutable for AI: AI may confirm it, but never overwrite it.
   if(result.priceVerification?.status==='VERIFIED') applied.result.price=result.price;
   const priceConfirmed=chosen?.price_verdict==='CONFIRM'&&evalResult.matchesCurrent&&!evalResult.priceConflict;
-  return {...applied.result,source:[...new Set([...(result.source||[]),...(applied.applied?[`ai-inspector:${chosenModel}`]:[])])],aiInspector:{used:applied.applied,configured:true,model:chosenModel,primaryModel:AI_INSPECTOR_MODEL,fallbackModel:AI_INSPECTOR_FALLBACK_MODEL,fallbackUsed,confidence:applied.confidence,reason:cleanText(chosen.reason).slice(0,220),priceVerdict:chosen.price_verdict,priceConfirmed,priceLocked:result.priceVerification?.status==='VERIFIED',priceConflict:evalResult.priceConflict}};
+  return {...applied.result,source:[...new Set([...(result.source||[]),...(applied.applied?[`ai-inspector:${chosenModel}`]:[])])],aiInspector:await aiStatusSnapshot({used:applied.applied,model:chosenModel,primaryModel:AI_INSPECTOR_MODEL,fallbackModel:AI_INSPECTOR_FALLBACK_MODEL,fallbackUsed,cacheHit,confidence:applied.confidence,reason:cleanText(chosen.reason).slice(0,220),priceVerdict:chosen.price_verdict,priceConfirmed,priceLocked:result.priceVerification?.status==='VERIFIED',priceConflict:evalResult.priceConflict})};
 }
 
 function inferCategoryFromTitle(title='', domain='') {
@@ -1777,6 +1953,12 @@ function inferCategoryFromTitle(title='', domain='') {
   if (/кросів|кроссов|черевик|ботин|converse|одяг|одежд|футболк|куртк/.test(t)) return 'Одежда и обувь';
   if (/парфум|духи|космет|крем|шампун|помад|туш|makeup/.test(t)) return 'Красота';
   return null;
+}
+function productPriceReliable(result={},domain='') {
+  const price=numericPrice(result.price);
+  if(!price)return false;
+  if(domain!=='touch.com.ua')return true;
+  return ['VERIFIED','SALE_PAIR'].includes(String(result.priceVerification?.status||''));
 }
 
 app.post('/api/product-preview', requireAuth, rateLimit('product-preview',18,60_000), async (req, res) => {
@@ -1849,11 +2031,17 @@ app.post('/api/product-preview', requireAuth, rateLimit('product-preview',18,60_
   // VERIFIED arithmetic prices are locked and cannot be overwritten by AI.
   result = await inspectProductWithAi(result, url, info.domain);
 
-  const quality = qualityOf(result);
+  const priceReliable=productPriceReliable(result,info.domain);
+  const responsePrice=priceReliable?numericPrice(result.price):null;
+  const responseVerification=priceReliable
+    ? (result.priceVerification || {status:'CURRENT_ONLY',verified:false,source:'parser-current',reason:''})
+    : {status:'UNVERIFIED_TOUCH',verified:false,source:'touch-guard',reason:'Touch не дал подтвердить текущую цену; старая цена заблокирована.',checkedAt:new Date().toISOString()};
+  const quality = qualityOf({...result,price:responsePrice});
   const category = inferCategoryFromTitle(result.title, info.domain);
   let message;
-  if (quality === 'complete') message = result.priceVerification?.status==='VERIFIED'
-    ? `Готово. Цена подтверждена бесплатной арифметикой${result.aiInspector?.priceConfirmed?' и AI-инспектором':''}.`
+  if(!priceReliable&&info.domain==='touch.com.ua') message='Touch не дал надёжно подтвердить текущую цену. Старая цена заблокирована и не подставлена; AI не запускался, токены не списывались.';
+  else if (quality === 'complete') message = result.priceVerification?.status==='VERIFIED'
+    ? `Готово. Цена подтверждена бесплатной арифметикой. AI не запускался, токены не списывались.`
     : result.aiInspector?.used ? `Готово. AI-инспектор ${result.aiInspector.model} перепроверил карточку.` : 'Готово. Проверь данные перед сохранением.';
   else if (quality === 'partial') message = result.aiInspector?.used ? 'AI-инспектор уточнил доступные данные — проверь недостающие поля.' : 'Получены не все данные — проверь и при необходимости дополни поля.';
   else message = 'Магазин не дал прочитать карточку автоматически. Ссылка сохранена — заполни недостающие поля вручную.';
@@ -1861,10 +2049,11 @@ app.post('/api/product-preview', requireAuth, rateLimit('product-preview',18,60_
   res.json({
     title: usableTitle(result.title),
     image: result.image || '',
-    price: numericPrice(result.price),
-    originalPrice: numericPrice(result.originalPrice),
-    discountAmount: numericPrice(result.discountAmount),
-    priceVerification: result.priceVerification || {status:'CURRENT_ONLY',verified:false,source:'parser-current',reason:''},
+    price: responsePrice,
+    priceReliable,
+    originalPrice:priceReliable?numericPrice(result.originalPrice):null,
+    discountAmount:priceReliable?numericPrice(result.discountAmount):null,
+    priceVerification:responseVerification,
     variant: cleanText(result.variant),
     store: info.store,
     storeDomain: info.domain,
@@ -1873,7 +2062,7 @@ app.post('/api/product-preview', requireAuth, rateLimit('product-preview',18,60_
     quality,
     message,
     blocked: directStatus === 403 || directStatus === 429,
-    inspector: result.aiInspector || {used:false,configured:AI_INSPECTOR_ENABLED,model:AI_INSPECTOR_MODEL,fallbackModel:AI_INSPECTOR_FALLBACK_MODEL},
+    inspector: result.aiInspector || await aiStatusSnapshot({used:false,skipped:true,skipReason:'not-needed',tokenFree:true}),
     sources: result.source || []
   });
 });
@@ -1882,7 +2071,7 @@ app.post('/api/product-preview', requireAuth, rateLimit('product-preview',18,60_
 
 app.get('*', (req, res) => res.sendFile(`${process.cwd()}/public/index.html`));
 
-export { parseMakeupReaderMarkdown, parseMakeupSearchHtml, parseMakeupSearchText, rankMakeupImages, makeupImageScore, parseHtmlProduct, rankGenericProductImages, genericProductImageScore, genericCurrentPrice, promotionalCurrentPrice, parseReaderMarkdown, validateAvatarDataUrl, imageDimensionsFromBuffer, priceHistorySummary, shouldRunReaderPriceCheck };
+export { parseMakeupReaderMarkdown, parseMakeupSearchHtml, parseMakeupSearchText, rankMakeupImages, makeupImageScore, parseHtmlProduct, rankGenericProductImages, genericProductImageScore, genericCurrentPrice, promotionalCurrentPrice, parseReaderMarkdown, validateAvatarDataUrl, imageDimensionsFromBuffer, priceHistorySummary, shouldRunReaderPriceCheck, reconcileDeterministicPrice, buildAiInspectorEvidence, shouldRunAiProductInspector, productPriceReliable, eligibleCurrentPrices, classifyOpenAiFailure };
 
 if (process.env.HOCHU_TEST !== '1') {
   initDb().then(() => {
