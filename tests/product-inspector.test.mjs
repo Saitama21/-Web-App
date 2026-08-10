@@ -18,4 +18,15 @@ test('ignores low-confidence decisions',()=>{
   assert.equal(applied,false); assert.equal(result.price,100);
 });
 
+
+test('never applies old or discount candidates as current price',()=>{
+  const evidence={prices:[{value:21599,role:'old'},{value:7100,role:'discount'},{value:14499,role:'current'}]};
+  const a=applyInspectorDecision({price:14499},evidence,{price_index:0,image_index:-1,variant_index:-1,confidence:.99});
+  assert.equal(a.result.price,14499);
+  const b=applyInspectorDecision({price:14499},evidence,{price_index:1,image_index:-1,variant_index:-1,confidence:.99});
+  assert.equal(b.result.price,14499);
+  const c=applyInspectorDecision({price:21599},evidence,{price_index:2,image_index:-1,variant_index:-1,confidence:.99});
+  assert.equal(c.result.price,14499);
+});
+
 test('schema enums include -1 sentinel',()=>assert.deepEqual(inspectorEnum(3),[-1,0,1,2]));

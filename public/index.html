@@ -10,11 +10,11 @@
   <meta name="apple-mobile-web-app-title" content="Хочу">
   <title>Хочу — журнал покупок</title>
   <link rel="manifest" href="/manifest.webmanifest">
-  <link rel="apple-touch-icon" sizes="180x180" href="/assets/icons/apple-touch-icon.png?v=1.2.4">
-  <link rel="icon" type="image/png" sizes="32x32" href="/assets/icons/favicon-32.png?v=1.2.4">
-  <link rel="icon" type="image/png" sizes="64x64" href="/assets/icons/favicon-64.png?v=1.2.4">
-  <link rel="shortcut icon" href="/assets/icons/favicon.ico?v=1.2.4">
-  <link rel="stylesheet" href="/styles.css?v=1.2.4">
+  <link rel="apple-touch-icon" sizes="180x180" href="/assets/icons/apple-touch-icon.png?v=1.3.0">
+  <link rel="icon" type="image/png" sizes="32x32" href="/assets/icons/favicon-32.png?v=1.3.0">
+  <link rel="icon" type="image/png" sizes="64x64" href="/assets/icons/favicon-64.png?v=1.3.0">
+  <link rel="shortcut icon" href="/assets/icons/favicon.ico?v=1.3.0">
+  <link rel="stylesheet" href="/styles.css?v=1.3.0">
 </head>
 <body>
   <div class="ambient ambient-a"></div>
@@ -46,7 +46,7 @@
     <aside class="sidebar glass">
       <div class="brand-block">
         <img src="/assets/icons/icon-192.png" alt="" class="brand-icon">
-        <div class="brand-copy"><strong>Хочу</strong><span>твои покупки</span><em id="appVersionBadge" class="version-badge">v1.2.4</em></div>
+        <div class="brand-copy"><strong>Хочу</strong><span>твои покупки</span><em id="appVersionBadge" class="version-badge">v1.3.0</em></div>
       </div>
 
       <nav id="sidebarNav" class="side-nav">
@@ -71,7 +71,7 @@
         <div class="top-title">
           <div class="mobile-brand-version glass-subtle" aria-label="Хочу — версия приложения">
             <img src="/assets/icons/icon-192.png" alt="">
-            <b>Хочу</b><em id="mobileVersionBadge">v1.2.4</em>
+            <b>Хочу</b><em id="mobileVersionBadge">v1.3.0</em>
           </div>
           <h2 id="pageTitle">Мои покупки</h2>
           <span id="pageSubtitle">Желания, на которые ты копишь</span>
@@ -213,8 +213,8 @@
             <button id="saveName" class="secondary">Сохранить имя</button>
           </section>
           <section class="settings-card glass ai-inspector-settings">
-            <div class="ai-inspector-head"><span class="ai-inspector-orb">✦</span><div><h3>AI-инспектор товара</h3><p>Перепроверяет фото, текущую цену и вариант только когда ты нажимаешь «Подтянуть».</p></div></div>
-            <div class="ai-inspector-state"><span id="aiInspectorStatus" class="ai-status checking">Проверяю…</span><small id="aiInspectorModel">gpt-5.6-terra</small></div>
+            <div class="ai-inspector-head"><span class="ai-inspector-orb">✦</span><div><h3>AI-инспектор товара</h3><p>Сначала бесплатно проверяет цену и скидку, затем gpt-5-mini перепроверяет фото/цену; Terra включается только при конфликте.</p></div></div>
+            <div class="ai-inspector-state"><span id="aiInspectorStatus" class="ai-status checking">Проверяю…</span><small id="aiInspectorModel">gpt-5-mini · fallback gpt-5.6-terra</small></div>
           </section>
           <section class="settings-card glass install-settings-card">
             <div class="install-setting-head"><img src="/assets/icons/icon-192.png" class="install-setting-icon" alt=""><div><h3>Установить «Хочу»</h3><p>Добавь значок на главный экран и запускай журнал как обычное приложение.</p></div></div>
@@ -238,12 +238,14 @@
     <form id="editorForm" class="editor glass">
       <div class="editor-head"><div><span class="kicker">КАРТОЧКА ПОКУПКИ</span><h2 id="editorTitle">Новое желание</h2></div><button id="editorClose" type="button" class="icon-button">×</button></div>
       <input id="itemId" type="hidden">
+      <input id="originalPriceInput" type="hidden"><input id="discountAmountInput" type="hidden"><input id="priceVerificationStatusInput" type="hidden"><input id="priceVerificationSourceInput" type="hidden"><input id="priceCheckedAtInput" type="hidden">
       <div class="editor-layout">
         <aside class="product-preview glass-subtle">
           <div id="previewImageWrap" class="preview-image"><img id="previewImage" alt=""><span id="previewPlaceholder">🛍</span></div>
           <h3 id="previewTitle">Новое желание</h3>
           <div id="previewStoreBadge" class="store-badge">Магазин</div>
           <div class="preview-money"><span>Цена</span><strong id="previewPrice">0 ₴</strong></div>
+          <div id="previewSaleMeta" class="preview-sale-meta hidden"><del id="previewOriginalPrice"></del><span id="previewDiscount"></span><b id="previewPriceStatus"></b></div>
           <div class="preview-money"><span>Накопил</span><strong id="previewSaved">0 ₴</strong></div>
           <div id="previewRemaining" class="preview-remaining">Осталось накопить 0 ₴</div>
           <div class="progress-track"><i id="previewProgressBar"></i></div><small id="previewProgressText">0%</small>
@@ -253,9 +255,10 @@
           <label>Ссылка на товар<div class="url-row"><input id="urlInput" type="url" placeholder="https://…"><button id="fetchPreview" type="button" class="secondary">✦ Подтянуть</button></div><small id="fetchMessage" class="form-message"></small></label>
           <label>Название<input id="titleInput" required placeholder="Например, BLUETTI Premium 30 V2"></label>
           <div class="grid2"><label>Цена, ₴<input id="priceInput" type="number" min="0" step="0.01" inputmode="decimal"></label><label>Накопил, ₴<input id="savedInput" type="number" min="0" step="0.01" inputmode="decimal"></label></div>
+          <div id="priceVerificationHint" class="price-verification-hint hidden"></div>
           <div id="savingsHint" class="savings-hint">Укажи цену и сумму накоплений — покажу, сколько осталось.</div>
           <section id="priceHistorySection" class="price-history-card hidden">
-            <div class="price-history-head"><div><b>История цены</b><small id="priceHistoryCaption">История меняется только если ты вручную изменишь сохранённую цену.</small></div><span id="priceHistoryTrend" class="price-history-trend">—</span></div>
+            <div class="price-history-head"><div><b>История цены</b><small id="priceHistoryCaption">История обновляется, когда ты сохраняешь изменившуюся цену.</small></div><span id="priceHistoryTrend" class="price-history-trend">—</span></div>
             <div class="price-history-stats"><span>Минимум <b id="priceHistoryMin">—</b></span><span>Максимум <b id="priceHistoryMax">—</b></span><span>Записей <b id="priceHistoryCount">0</b></span></div>
             <div class="price-chart-wrap"><svg id="priceHistoryChart" viewBox="0 0 600 160" preserveAspectRatio="none" aria-label="График истории цены"></svg></div>
             <div id="priceHistoryDates" class="price-history-dates"></div>
@@ -354,6 +357,6 @@
     </div>
   </dialog>
 
-  <script src="/app.js?v=1.2.4"></script>
+  <script src="/app.js?v=1.3.0"></script>
 </body>
 </html>

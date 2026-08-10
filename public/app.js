@@ -29,7 +29,7 @@ const params = new URLSearchParams(location.search);
 const state = {
   items: [], view: 'home', homeStatus: 'all', theme: localStorage.getItem('hochu-theme') || 'system',
   me: null, inviteToken: params.get('invite') || '', resetToken: params.get('reset') || '',
-  version:'1.2.4', aiInspector:null, admin: { overview:null, users:[], requests:[], resets:[] }
+  version:'1.3.0', aiInspector:null, admin: { overview:null, users:[], requests:[], resets:[] }
 };
 
 const els = {
@@ -46,7 +46,8 @@ const els = {
   aiInspectorStatus:$('aiInspectorStatus'), aiInspectorModel:$('aiInspectorModel'), openInstallGuide:$('openInstallGuide'), installGuideDialog:$('installGuideDialog'), installGuideClose:$('installGuideClose'), installGuideDone:$('installGuideDone'), installStatus:$('installStatus'), installNow:$('installNow'),
   editor:$('editorDialog'), editorForm:$('editorForm'), editorTitle:$('editorTitle'), editorClose:$('editorClose'), cancelEditor:$('cancelEditor'), deleteItem:$('deleteItem'),
   itemId:$('itemId'), urlInput:$('urlInput'), fetchPreview:$('fetchPreview'), fetchMessage:$('fetchMessage'), titleInput:$('titleInput'), priceInput:$('priceInput'), savedInput:$('savedInput'), categoryInput:$('categoryInput'), priorityInput:$('priorityInput'), statusInput:$('statusInput'), storeInput:$('storeInput'), variantInput:$('variantInput'), imageInput:$('imageInput'), noteInput:$('noteInput'),
-  previewImageWrap:$('previewImageWrap'), previewImage:$('previewImage'), previewPlaceholder:$('previewPlaceholder'), previewTitle:$('previewTitle'), previewStoreBadge:$('previewStoreBadge'), previewPrice:$('previewPrice'), previewSaved:$('previewSaved'), previewRemaining:$('previewRemaining'), previewProgressBar:$('previewProgressBar'), previewProgressText:$('previewProgressText'), visitSiteButton:$('visitSiteButton'),
+  originalPriceInput:$('originalPriceInput'), discountAmountInput:$('discountAmountInput'), priceVerificationStatusInput:$('priceVerificationStatusInput'), priceVerificationSourceInput:$('priceVerificationSourceInput'), priceCheckedAtInput:$('priceCheckedAtInput'), priceVerificationHint:$('priceVerificationHint'),
+  previewImageWrap:$('previewImageWrap'), previewImage:$('previewImage'), previewPlaceholder:$('previewPlaceholder'), previewTitle:$('previewTitle'), previewStoreBadge:$('previewStoreBadge'), previewPrice:$('previewPrice'), previewSaleMeta:$('previewSaleMeta'), previewOriginalPrice:$('previewOriginalPrice'), previewDiscount:$('previewDiscount'), previewPriceStatus:$('previewPriceStatus'), previewSaved:$('previewSaved'), previewRemaining:$('previewRemaining'), previewProgressBar:$('previewProgressBar'), previewProgressText:$('previewProgressText'), visitSiteButton:$('visitSiteButton'),
   savingsHint:$('savingsHint'), priceHistorySection:$('priceHistorySection'), priceHistoryCaption:$('priceHistoryCaption'), priceHistoryTrend:$('priceHistoryTrend'), priceHistoryMin:$('priceHistoryMin'), priceHistoryMax:$('priceHistoryMax'), priceHistoryCount:$('priceHistoryCount'), priceHistoryChart:$('priceHistoryChart'), priceHistoryDates:$('priceHistoryDates'),
   accessDialog:$('accessDialog'), accessForm:$('accessForm'), accessClose:$('accessClose'), accessCancel:$('accessCancel'), accessInviteState:$('accessInviteState'), accessName:$('accessName'), accessUsername:$('accessUsername'), accessEmail:$('accessEmail'), accessPassword:$('accessPassword'), accessPassword2:$('accessPassword2'), accessMessage:$('accessMessage'), accessFormMessage:$('accessFormMessage'),
   forgotDialog:$('forgotDialog'), forgotForm:$('forgotForm'), forgotClose:$('forgotClose'), forgotCancel:$('forgotCancel'), forgotLogin:$('forgotLogin'), forgotMessage:$('forgotMessage'),
@@ -200,7 +201,7 @@ function updateProfile(){
   const u=state.me; if(!u)return;
   els.profileName.textContent=u.name||u.username; setAvatarElement(els.profileAvatar,u); setAvatarElement(els.profileAvatarPreview,u);
   els.profileRole.textContent=u.role==='admin'?'администратор':'личный журнал'; els.nameSetting.value=u.name||''; els.accountSetting.value=`${u.username} · ${u.email}`;
-  if(els.appVersionBadge) els.appVersionBadge.textContent=`v${state.version||'1.2.4'}`; if(els.mobileVersionBadge) els.mobileVersionBadge.textContent=`v${state.version||'1.2.4'}`;
+  if(els.appVersionBadge) els.appVersionBadge.textContent=`v${state.version||'1.3.0'}`; if(els.mobileVersionBadge) els.mobileVersionBadge.textContent=`v${state.version||'1.3.0'}`;
   els.removeAvatar?.classList.toggle('hidden',!safeAvatarData(u.avatar));
   els.adminNavItem.classList.toggle('hidden',u.role!=='admin'); els.adminSettingsCard.classList.toggle('hidden',u.role!=='admin');
 }
@@ -209,10 +210,10 @@ function updateProfile(){
 function updateAiInspectorStatus(info={}){
   state.aiInspector=info||{};
   if(!els.aiInspectorStatus)return;
-  const enabled=Boolean(info?.configured); const model=info?.model||'gpt-5.6-terra';
+  const enabled=Boolean(info?.configured); const model=info?.model||'gpt-5-mini'; const fallback=info?.fallbackModel||'';
   els.aiInspectorStatus.className=`ai-status ${enabled?'active':'inactive'}`;
   els.aiInspectorStatus.textContent=enabled?'Подключён ✓':'Не настроен';
-  if(els.aiInspectorModel)els.aiInspectorModel.textContent=enabled?model:'Добавь OPENAI_API_KEY в Railway Variables';
+  if(els.aiInspectorModel)els.aiInspectorModel.textContent=enabled?(fallback&&fallback!==model?`${model} · fallback ${fallback}`:model):'Добавь OPENAI_API_KEY в Railway Variables';
 }
 
 async function boot(){
@@ -328,6 +329,36 @@ function renderStats(){
   els.categoryProgress.innerHTML=Object.entries(groups).map(([cat,arr])=>{const t=arr.reduce((s,x)=>s+x.price,0),sv=arr.reduce((s,x)=>s+Math.min(x.saved,x.price||x.saved),0),pct=t?sv/t*100:0;return `<div class="progress-row"><label>${esc(cat)}</label><div class="bar"><i style="width:${clamp(pct,0,100)}%"></i></div><span>${Math.round(pct)}% · ${money(sv)}</span></div>`}).join('')||'<div class="empty-state"><p>Статистика появится после добавления желаний.</p></div>';
 }
 
+function clearPriceVerification(){
+  if(els.originalPriceInput)els.originalPriceInput.value='';
+  if(els.discountAmountInput)els.discountAmountInput.value='';
+  if(els.priceVerificationStatusInput)els.priceVerificationStatusInput.value='';
+  if(els.priceVerificationSourceInput)els.priceVerificationSourceInput.value='';
+  if(els.priceCheckedAtInput)els.priceCheckedAtInput.value='';
+  if(els.priceVerificationHint){els.priceVerificationHint.textContent='';els.priceVerificationHint.className='price-verification-hint hidden';}
+}
+function setPriceVerification(data={}){
+  const current=Number(data.price||els.priceInput?.value||0),original=Number(data.originalPrice||0),discount=Number(data.discountAmount||0),v=data.priceVerification||{};
+  if(els.originalPriceInput)els.originalPriceInput.value=original>current?String(original):'';
+  if(els.discountAmountInput)els.discountAmountInput.value=original>current&&discount>0?String(discount):'';
+  if(els.priceVerificationStatusInput)els.priceVerificationStatusInput.value=String(v.status||'');
+  if(els.priceVerificationSourceInput)els.priceVerificationSourceInput.value=String(v.source||'');
+  if(els.priceCheckedAtInput)els.priceCheckedAtInput.value=String(v.checkedAt||new Date().toISOString());
+  if(els.priceVerificationHint){
+    if(v.status==='VERIFIED'&&original>current&&discount>0){
+      els.priceVerificationHint.className='price-verification-hint verified';
+      els.priceVerificationHint.textContent=`✓ Цена подтверждена бесплатно: ${money(original)} − ${money(discount)} = ${money(current)}`;
+    }else if(v.status==='SALE_PAIR'&&original>current){
+      els.priceVerificationHint.className='price-verification-hint sale-pair';
+      els.priceVerificationHint.textContent=`Старая цена ${money(original)}; скидка ${money(discount||original-current)} рассчитана автоматически.`;
+    }else if(v.status==='CONFLICT'){
+      els.priceVerificationHint.className='price-verification-hint conflict';
+      els.priceVerificationHint.textContent='⚠ Найден конфликт цен. Проверь цену на сайте перед сохранением.';
+    }else{
+      els.priceVerificationHint.textContent='';els.priceVerificationHint.className='price-verification-hint hidden';
+    }
+  }
+}
 function updateSiteLink(){
   const url=els.urlInput.value.trim();
   try{
@@ -342,18 +373,21 @@ function updateSiteLink(){
 }
 function resetEditor(){
   els.editorForm.reset(); els.itemId.value=''; els.fetchMessage.textContent=''; els.fetchPreview.textContent='✦ Подтянуть'; els.fetchPreview.classList.remove('hidden'); els.deleteItem.classList.add('hidden'); els.editorTitle.textContent='Новое желание'; els.priorityInput.value='2'; els.statusInput.value='want'; els.categoryInput.value='Техника';
-  els.priceHistorySection.classList.add('hidden'); els.priceHistoryChart.innerHTML=''; els.priceHistoryDates.innerHTML='';
+  els.priceHistorySection.classList.add('hidden'); els.priceHistoryChart.innerHTML=''; els.priceHistoryDates.innerHTML=''; clearPriceVerification();
   updatePreview(); updateSiteLink();
 }
 function openEditor(id=null){
   resetEditor();
-  if(id){ const x=state.items.find(v=>v.id===id); if(!x)return; els.itemId.value=x.id;els.urlInput.value=x.url||'';els.titleInput.value=x.title||'';els.priceInput.value=x.price||'';els.savedInput.value=x.saved||'';els.categoryInput.value=x.category||'Другое';els.priorityInput.value=String(x.priority||2);els.statusInput.value=x.status||'want';els.storeInput.value=x.store||'';els.variantInput.value=x.variant||'';els.imageInput.value=validImageUrl(x.image||'');els.noteInput.value=x.note||'';els.deleteItem.classList.remove('hidden');els.editorTitle.textContent='Карточка желания';els.fetchPreview.classList.add('hidden');els.fetchMessage.textContent='Цена сохранена в «Хочу». Актуальную цену проверь на сайте магазина.';loadPriceHistory(x.id); }
+  if(id){ const x=state.items.find(v=>v.id===id); if(!x)return; els.itemId.value=x.id;els.urlInput.value=x.url||'';els.titleInput.value=x.title||'';els.priceInput.value=x.price||'';els.savedInput.value=x.saved||'';els.categoryInput.value=x.category||'Другое';els.priorityInput.value=String(x.priority||2);els.statusInput.value=x.status||'want';els.storeInput.value=x.store||'';els.variantInput.value=x.variant||'';els.imageInput.value=validImageUrl(x.image||'');els.noteInput.value=x.note||'';setPriceVerification({price:x.price,originalPrice:x.originalPrice,discountAmount:x.discountAmount,priceVerification:{status:x.priceVerificationStatus,source:x.priceVerificationSource,checkedAt:x.priceCheckedAt}});els.deleteItem.classList.remove('hidden');els.editorTitle.textContent='Карточка желания';els.fetchPreview.classList.remove('hidden');els.fetchPreview.textContent='✦ Подтянуть снова';els.fetchMessage.textContent=x.priceVerificationStatus==='VERIFIED'?'Цена сохранена и была подтверждена бесплатной арифметикой. Нажми «Подтянуть снова», чтобы перепроверить сайт.':'Цена сохранена в «Хочу». Нажми «Подтянуть снова», чтобы перепроверить цену на сайте.';loadPriceHistory(x.id); }
   updatePreview(); updateSiteLink(); els.editor.showModal();
 }
 function updatePreview(){
   const title=els.titleInput.value.trim()||'Новое желание',price=Number(els.priceInput.value||0),saved=Number(els.savedInput.value||0),pct=price?clamp(saved/price*100,0,100):0,img=validImageUrl(els.imageInput.value),store=els.storeInput.value.trim()||'Магазин',variant=els.variantInput.value.trim();
   const left=Math.max(0,price-saved), funded=price>0&&saved>=price;
   els.previewTitle.textContent=title;els.previewStoreBadge.textContent=variant?`${store} · ${variant}`:store;els.previewPrice.textContent=money(price);els.previewSaved.textContent=money(saved);els.previewProgressBar.style.width=`${pct}%`;els.previewProgressText.textContent=`${Math.round(pct)}%`;
+  const original=Number(els.originalPriceInput?.value||0),discount=Number(els.discountAmountInput?.value||0),verification=els.priceVerificationStatusInput?.value||'';
+  const showSale=price>0&&original>price;
+  if(els.previewSaleMeta){els.previewSaleMeta.classList.toggle('hidden',!showSale);if(showSale){els.previewOriginalPrice.textContent=money(original);els.previewDiscount.textContent=`−${money(discount||original-price)}`;els.previewPriceStatus.textContent=verification==='VERIFIED'?'✓ проверено':'скидка';}}
   els.previewRemaining.textContent=!price?'Укажи цену':funded?'Деньги собраны ✓':`Осталось ${money(left)}`;
   els.previewRemaining.classList.toggle('funded',funded);
   els.savingsHint.innerHTML=!price?'Укажи цену и сумму накоплений — покажу, сколько осталось.':funded?`<b>Деньги собраны ✓</b> На покупку хватает. Ты накопил ${money(saved)}.`:`Осталось накопить <b>${money(left)}</b> · готово ${Math.round(pct)}%.`;
@@ -373,7 +407,7 @@ function renderPriceHistory(data){
     els.priceHistoryTrend.className=`price-history-trend ${down?'down':'up'}`;
     els.priceHistoryTrend.textContent=`${down?'↓':'↑'} ${pct<1?pct.toFixed(1):Math.round(pct)}%`;
   }else{els.priceHistoryTrend.className='price-history-trend';els.priceHistoryTrend.textContent=entries.length>1?'Без изменений':'Первая цена';}
-  els.priceHistoryCaption.textContent=entries.length>1?'История меняется только когда ты вручную сохраняешь другую цену.':'Это сохранённая цена. Если вручную изменишь её позже, появится следующая точка.';
+  els.priceHistoryCaption.textContent=entries.length>1?'История обновляется, когда ты сохраняешь изменившуюся цену.':'Это сохранённая цена. После «Подтянуть снова» и сохранения новая цена станет следующей точкой.';
   els.priceHistoryChart.innerHTML='';
   if(entries.length){
     const W=600,H=160,PX=12,PY=18,prices=entries.map(x=>Number(x.price)),min=Math.min(...prices),max=Math.max(...prices),spread=Math.max(1,max-min);
@@ -389,7 +423,7 @@ async function loadPriceHistory(id){
   try{const data=await api(`/api/items/${id}/price-history`);if(els.itemId.value===id)renderPriceHistory(data)}catch{if(els.itemId.value===id)els.priceHistorySection.classList.add('hidden')}
 }
 function itemPayload(){
-  const url=els.urlInput.value.trim(); return {title:els.titleInput.value.trim(),url,image:validImageUrl(els.imageInput.value),store:els.storeInput.value.trim(),storeDomain:getDomain(url),variant:els.variantInput.value.trim(),price:Number(els.priceInput.value||0),saved:Number(els.savedInput.value||0),category:els.categoryInput.value,priority:Number(els.priorityInput.value),status:els.statusInput.value,note:els.noteInput.value.trim()};
+  const url=els.urlInput.value.trim(); return {title:els.titleInput.value.trim(),url,image:validImageUrl(els.imageInput.value),store:els.storeInput.value.trim(),storeDomain:getDomain(url),variant:els.variantInput.value.trim(),price:Number(els.priceInput.value||0),saved:Number(els.savedInput.value||0),category:els.categoryInput.value,priority:Number(els.priorityInput.value),status:els.statusInput.value,note:els.noteInput.value.trim(),originalPrice:Number(els.originalPriceInput?.value||0)||null,discountAmount:Number(els.discountAmountInput?.value||0)||null,priceVerificationStatus:els.priceVerificationStatusInput?.value||'',priceVerificationSource:els.priceVerificationSourceInput?.value||'',priceCheckedAt:els.priceCheckedAtInput?.value||null};
 }
 
 function fmtDate(v){ if(!v)return '—'; try{return new Intl.DateTimeFormat('ru-RU',{day:'2-digit',month:'2-digit',year:'numeric'}).format(new Date(v))}catch{return '—'} }
@@ -494,7 +528,8 @@ $$('#homeTabs .tab').forEach(b=>b.onclick=()=>{state.homeStatus=b.dataset.status
 [els.allSearch,els.allStatus,els.allCategory,els.allStore].forEach(el=>{el.addEventListener(el.tagName==='INPUT'?'input':'change',renderAllPurchases)});
 
 els.editorClose.onclick=()=>els.editor.close(); els.cancelEditor.onclick=()=>els.editor.close();
-[els.titleInput,els.priceInput,els.savedInput,els.storeInput,els.variantInput,els.imageInput].forEach(el=>el.addEventListener('input',updatePreview));
+[els.titleInput,els.savedInput,els.storeInput,els.variantInput,els.imageInput].forEach(el=>el.addEventListener('input',updatePreview));
+els.priceInput.addEventListener('input',()=>{clearPriceVerification();updatePreview()});
 els.urlInput.addEventListener('input',()=>{applyStoreFromUrl();updateSiteLink()});
 els.urlInput.addEventListener('paste',()=>setTimeout(()=>{applyStoreFromUrl();updateSiteLink()},0));
 els.fetchPreview.onclick=async()=>{
@@ -506,13 +541,14 @@ els.fetchPreview.onclick=async()=>{
     const d=await api('/api/product-preview',{method:'POST',body:JSON.stringify({url})});
     if(d.title) els.titleInput.value=d.title;
     if(d.price) els.priceInput.value=d.price;
+    setPriceVerification(d);
     if(d.store) els.storeInput.value=d.store;
     if(d.variant) els.variantInput.value=d.variant;
     if(d.image) els.imageInput.value=validImageUrl(d.image);
     if(d.category) els.categoryInput.value=d.category;
     if(d.canonicalUrl) els.urlInput.value=d.canonicalUrl;
     els.fetchMessage.textContent=d.message || (d.quality==='partial'?'Получены не все данные — проверь поля.':d.quality==='none'?'Не удалось получить данные автоматически. Заполни поля вручную.':'Готово. Проверь данные перед сохранением.');
-    if(d.inspector?.configured&&!d.inspector?.used&&d.quality!=='none') els.fetchMessage.title=`AI-инспектор ${d.inspector.model} подключён; обычный парсер уже дал уверенный результат или инспектор не изменил выбор.`;
+    if(d.inspector?.configured&&!d.inspector?.used&&d.quality!=='none') els.fetchMessage.title=`AI-инспектор ${d.inspector.model} подключён; бесплатный парсер/арифметика уже дали уверенный результат или инспектор не изменил выбор.`;
     if(d.inspector) updateAiInspectorStatus(d.inspector);
     els.fetchPreview.textContent=d.quality==='none'?'✦ Подтянуть':'✦ Подтянуть снова';
     updatePreview();
@@ -550,7 +586,7 @@ window.addEventListener('appinstalled',()=>{deferredInstallPrompt=null;updateIns
 if('serviceWorker' in navigator){
   window.addEventListener('load',async()=>{
     try{
-      const reg=await navigator.serviceWorker.register('/sw.js?v=1.2.4',{updateViaCache:'none'});
+      const reg=await navigator.serviceWorker.register('/sw.js?v=1.3.0',{updateViaCache:'none'});
       await reg.update();
     }catch{}
   });
