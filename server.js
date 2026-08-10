@@ -10,7 +10,7 @@ import { validatePriceArithmetic, pickBestPriceFact, candidatePriceRole } from '
 const { Pool } = pg;
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
-const VERSION = '1.3.0';
+const VERSION = '1.3.1';
 const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '').trim();
 const AI_INSPECTOR_MODEL = String(process.env.AI_INSPECTOR_MODEL || 'gpt-5-mini').trim() || 'gpt-5-mini';
 const AI_INSPECTOR_FALLBACK_MODEL = String(process.env.AI_INSPECTOR_FALLBACK_MODEL || 'gpt-5.6-terra').trim() || 'gpt-5.6-terra';
@@ -560,7 +560,8 @@ const STORE_CONFIG = {
   'allo.ua': { name: 'ALLO', category: 'Техника' },
   'comfy.ua': { name: 'COMFY', category: 'Техника' },
   'foxtrot.com.ua': { name: 'Фокстрот', category: 'Техника' },
-  'epicentrk.ua': { name: 'Епіцентр', category: null }
+  'epicentrk.ua': { name: 'Епіцентр', category: null },
+  'touch.com.ua': { name: 'Touch', category: null }
 };
 
 function first(...vals) { return vals.find(v => v !== undefined && v !== null && String(v).trim() !== ''); }
@@ -623,6 +624,18 @@ function promotionalPriceFacts(text='') {
 function promotionalCurrentPrice(text='') {
   return promotionalPriceFacts(text)?.currentPrice || null;
 }
+
+function shouldRunReaderPriceCheck(domain='', result={}) {
+  // Touch renders the payable sale price separately from the server-side Product/Offer data.
+  // A direct fetch can therefore look "complete" while containing only the old price. Force
+  // the rendered-reader pass until the direct page has already supplied a trustworthy sale pair.
+  if(String(domain).toLowerCase()!=='touch.com.ua') return false;
+  return !(result.priceFacts||[]).some(fact=>{
+    const status=validatePriceArithmetic(fact).status;
+    return status==='VERIFIED'||status==='SALE_PAIR';
+  });
+}
+
 function genericDomSalePairFacts($,currentPrice=null) {
   const current=numericPrice(currentPrice);
   if(!current)return null;
@@ -1815,7 +1828,8 @@ app.post('/api/product-preview', requireAuth, rateLimit('product-preview',18,60_
     }
   } else {
     const suspiciousImage=!result.image || productImageNegative(result.image);
-    if (qualityOf(result) !== 'complete' || suspiciousImage) result = mergeProduct(result, await readerFallback(url,info.domain));
+    const priceNeedsReader=shouldRunReaderPriceCheck(info.domain,result);
+    if (qualityOf(result) !== 'complete' || suspiciousImage || priceNeedsReader) result = mergeProduct(result, await readerFallback(url,info.domain));
     if (qualityOf(result) !== 'complete') result = mergeProduct(result, await microlinkFallback(url));
   }
 
@@ -1868,7 +1882,7 @@ app.post('/api/product-preview', requireAuth, rateLimit('product-preview',18,60_
 
 app.get('*', (req, res) => res.sendFile(`${process.cwd()}/public/index.html`));
 
-export { parseMakeupReaderMarkdown, parseMakeupSearchHtml, parseMakeupSearchText, rankMakeupImages, makeupImageScore, parseHtmlProduct, rankGenericProductImages, genericProductImageScore, genericCurrentPrice, promotionalCurrentPrice, parseReaderMarkdown, validateAvatarDataUrl, imageDimensionsFromBuffer, priceHistorySummary };
+export { parseMakeupReaderMarkdown, parseMakeupSearchHtml, parseMakeupSearchText, rankMakeupImages, makeupImageScore, parseHtmlProduct, rankGenericProductImages, genericProductImageScore, genericCurrentPrice, promotionalCurrentPrice, parseReaderMarkdown, validateAvatarDataUrl, imageDimensionsFromBuffer, priceHistorySummary, shouldRunReaderPriceCheck };
 
 if (process.env.HOCHU_TEST !== '1') {
   initDb().then(() => {
