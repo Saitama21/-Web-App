@@ -29,7 +29,7 @@ const params = new URLSearchParams(location.search);
 const state = {
   items: [], view: 'home', homeStatus: 'all', theme: localStorage.getItem('hochu-theme') || 'system',
   me: null, inviteToken: params.get('invite') || '', resetToken: params.get('reset') || '',
-  version:'1.3.3', aiInspector:null, admin: { overview:null, users:[], requests:[], resets:[] }
+  version:'1.4.0', aiInspector:null, admin: { overview:null, users:[], requests:[], resets:[] }
 };
 
 const els = {
@@ -201,7 +201,7 @@ function updateProfile(){
   const u=state.me; if(!u)return;
   els.profileName.textContent=u.name||u.username; setAvatarElement(els.profileAvatar,u); setAvatarElement(els.profileAvatarPreview,u);
   els.profileRole.textContent=u.role==='admin'?'администратор':'личный журнал'; els.nameSetting.value=u.name||''; els.accountSetting.value=`${u.username} · ${u.email}`;
-  if(els.appVersionBadge) els.appVersionBadge.textContent=`v${state.version||'1.3.3'}`; if(els.mobileVersionBadge) els.mobileVersionBadge.textContent=`v${state.version||'1.3.3'}`;
+  if(els.appVersionBadge) els.appVersionBadge.textContent=`v${state.version||'1.4.0'}`; if(els.mobileVersionBadge) els.mobileVersionBadge.textContent=`v${state.version||'1.4.0'}`;
   els.removeAvatar?.classList.toggle('hidden',!safeAvatarData(u.avatar));
   els.adminNavItem.classList.toggle('hidden',u.role!=='admin'); els.adminSettingsCard.classList.toggle('hidden',u.role!=='admin');
 }
@@ -224,7 +224,8 @@ function updateAiInspectorStatus(info={}){
   if(els.aiInspectorDetail){
     const usage=enabled&&Number.isFinite(Number(info?.dailyLimit))?` Вызовы сегодня: ${Number(info.callsToday||0)}/${Number(info.dailyLimit||0)}.`:'';
     const free=info?.tokenFree?' AI для этой карточки не вызывался.':'';
-    els.aiInspectorDetail.textContent=`${info?.message||''}${usage}${free}`.trim()||'Статус API ещё не проверен.';
+    const attempts=info?.requestAttempted?` Попыток AI в этой проверке: ${Number(info.attempts||1)}.`:'';
+    els.aiInspectorDetail.textContent=`${info?.message||''}${usage}${attempts}${free}`.trim()||'Статус API ещё не проверен.';
   }
 }
 
@@ -363,9 +364,12 @@ function setPriceVerification(data={}){
     }else if(v.status==='SALE_PAIR'&&original>current){
       els.priceVerificationHint.className='price-verification-hint sale-pair';
       els.priceVerificationHint.textContent=`Старая цена ${money(original)}; скидка ${money(discount||original-current)} рассчитана автоматически.`;
-    }else if(v.status==='CONFLICT'||v.status==='UNVERIFIED_TOUCH'){
+    }else if(v.status==='STRUCTURED'||v.status==='WEB_VERIFIED'){
+      els.priceVerificationHint.className='price-verification-hint verified';
+      els.priceVerificationHint.textContent=v.status==='WEB_VERIFIED'?`✓ Цена ${money(current)} подтверждена на точной странице товара.`:`✓ Цена ${money(current)} подтверждена структурированными данными магазина.`;
+    }else if(v.status==='CONFLICT'||v.status==='UNVERIFIED_TOUCH'||v.status==='UNVERIFIED_PRICE'){
       els.priceVerificationHint.className='price-verification-hint conflict';
-      els.priceVerificationHint.textContent=v.status==='UNVERIFIED_TOUCH'?'⚠ Touch не подтвердил текущую цену. Старая цена заблокирована — проверь и введи цену вручную.':'⚠ Найден конфликт цен. Проверь цену на сайте перед сохранением.';
+      els.priceVerificationHint.textContent=v.status==='UNVERIFIED_TOUCH'?'⚠ Touch не подтвердил текущую цену. Старая цена заблокирована — проверь и введи цену вручную.':'⚠ Магазин отдал конфликтующие цены. Проверь цену на сайте перед сохранением.';
     }else{
       els.priceVerificationHint.textContent='';els.priceVerificationHint.className='price-verification-hint hidden';
     }
@@ -607,7 +611,7 @@ window.addEventListener('appinstalled',()=>{deferredInstallPrompt=null;updateIns
 if('serviceWorker' in navigator){
   window.addEventListener('load',async()=>{
     try{
-      const reg=await navigator.serviceWorker.register('/sw.js?v=1.3.3',{updateViaCache:'none'});
+      const reg=await navigator.serviceWorker.register('/sw.js?v=1.4.0',{updateViaCache:'none'});
       await reg.update();
     }catch{}
   });
