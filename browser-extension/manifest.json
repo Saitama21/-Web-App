@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "В Хочу",
+  "description": "Передаёт открытую карточку товара прямо в журнал покупок «Хочу».",
+  "version": "1.0.0",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "16": "icon-192.png",
+    "32": "icon-192.png",
+    "48": "icon-192.png",
+    "128": "icon-192.png"
+  },
+  "action": {
+    "default_title": "Добавить открытую карточку в Хочу",
+    "default_icon": "icon-192.png"
+  },
+  "options_page": "options.html"
+}

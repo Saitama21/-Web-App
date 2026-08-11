@@ -12,7 +12,7 @@ const CATEGORY_ICONS = {
 };
 const STORE_NAMES = {
   'rozetka.com.ua':'Rozetka','makeup.com.ua':'Makeup','converse.org.ua':'Converse','allo.ua':'ALLO',
-  'comfy.ua':'COMFY','foxtrot.com.ua':'Фокстрот','epicentrk.ua':'Епіцентр'
+  'comfy.ua':'COMFY','foxtrot.com.ua':'Фокстрот','epicentrk.ua':'Епіцентр','touch.com.ua':'Touch'
 };
 const STORE_DEFAULT_CATEGORY = {
   'makeup.com.ua':'Красота','converse.org.ua':'Одежда и обувь','allo.ua':'Техника',
@@ -25,11 +25,43 @@ function applyStoreFromUrl(){
   updatePreview();
 }
 
+const PRODUCT_IMPORT_SESSION='hochu-pending-product-import-v1';
+function decodeProductImport(raw=''){
+  if(!raw||raw.length>48000)return null;
+  try{
+    const normalized=raw.replace(/-/g,'+').replace(/_/g,'/');
+    const padded=normalized+'='.repeat((4-normalized.length%4)%4);
+    const binary=atob(padded),bytes=Uint8Array.from(binary,c=>c.charCodeAt(0));
+    const data=JSON.parse(new TextDecoder().decode(bytes));
+    const url=new URL(String(data.canonicalUrl||data.url||''));
+    if(!['http:','https:'].includes(url.protocol)||data.version!==1||data.origin!=='hochu-chrome-extension')return null;
+    const price=Number(data.price||0),originalPrice=Number(data.originalPrice||0),discountAmount=Number(data.discountAmount||0);
+    return {
+      version:1,origin:data.origin,extractedAt:String(data.extractedAt||''),adapter:String(data.adapter||'generic-dom').slice(0,40),
+      url:url.href,title:String(data.title||'').trim().slice(0,250),image:String(data.image||'').trim().slice(0,3000),
+      store:String(data.store||'').trim().slice(0,120),storeDomain:String(data.storeDomain||url.hostname.replace(/^www\./,'')).slice(0,250),variant:String(data.variant||'').trim().slice(0,80),
+      price:Number.isFinite(price)&&price>0&&price<=100000000?price:null,
+      originalPrice:Number.isFinite(originalPrice)&&originalPrice>0&&originalPrice<=100000000?originalPrice:null,
+      discountAmount:Number.isFinite(discountAmount)&&discountAmount>0&&discountAmount<=100000000?discountAmount:null,
+      arithmeticVerified:Boolean(data.arithmeticVerified),evidence:Array.isArray(data.evidence)?data.evidence.map(x=>String(x).slice(0,100)).slice(0,12):[]
+    };
+  }catch{return null}
+}
+function capturePendingProductImport(){
+  const raw=location.hash.startsWith('#import=')?location.hash.slice(8):'';
+  let data=raw?decodeProductImport(raw):null;
+  if(raw)history.replaceState({},'',`${location.pathname}${location.search}`);
+  if(data){try{sessionStorage.setItem(PRODUCT_IMPORT_SESSION,JSON.stringify(data))}catch{}return data}
+  try{data=JSON.parse(sessionStorage.getItem(PRODUCT_IMPORT_SESSION)||'null')}catch{data=null}
+  return data&&data.origin==='hochu-chrome-extension'?data:null;
+}
+
 const params = new URLSearchParams(location.search);
 const state = {
   items: [], view: 'home', homeStatus: 'all', theme: localStorage.getItem('hochu-theme') || 'system',
   me: null, inviteToken: params.get('invite') || '', resetToken: params.get('reset') || '',
-  version:'1.4.1', aiInspector:null, admin: { overview:null, users:[], requests:[], resets:[] }
+  pendingProductImport:capturePendingProductImport(),
+  version:'1.5.0', aiInspector:null, admin: { overview:null, users:[], requests:[], resets:[] }
 };
 
 const els = {
@@ -201,7 +233,7 @@ function updateProfile(){
   const u=state.me; if(!u)return;
   els.profileName.textContent=u.name||u.username; setAvatarElement(els.profileAvatar,u); setAvatarElement(els.profileAvatarPreview,u);
   els.profileRole.textContent=u.role==='admin'?'администратор':'личный журнал'; els.nameSetting.value=u.name||''; els.accountSetting.value=`${u.username} · ${u.email}`;
-  if(els.appVersionBadge) els.appVersionBadge.textContent=`v${state.version||'1.4.1'}`; if(els.mobileVersionBadge) els.mobileVersionBadge.textContent=`v${state.version||'1.4.1'}`;
+  if(els.appVersionBadge) els.appVersionBadge.textContent=`v${state.version||'1.5.0'}`; if(els.mobileVersionBadge) els.mobileVersionBadge.textContent=`v${state.version||'1.5.0'}`;
   els.removeAvatar?.classList.toggle('hidden',!safeAvatarData(u.avatar));
   els.adminNavItem.classList.toggle('hidden',u.role!=='admin'); els.adminSettingsCard.classList.toggle('hidden',u.role!=='admin');
 }
@@ -238,6 +270,7 @@ async function boot(){
   state.version=me.version||health.version||state.version; if(els.appVersionBadge)els.appVersionBadge.textContent=`v${state.version}`; if(els.mobileVersionBadge)els.mobileVersionBadge.textContent=`v${state.version}`;
   if(!me.authenticated){ showLogin(); return; }
   state.me=me.user; updateProfile(); showApp(); await loadItems();
+  applyPendingProductImport();
   if(state.me?.role==='admin') await refreshAdminBadge();
 }
 async function validateInvite(){
@@ -364,9 +397,9 @@ function setPriceVerification(data={}){
     }else if(v.status==='SALE_PAIR'&&original>current){
       els.priceVerificationHint.className='price-verification-hint sale-pair';
       els.priceVerificationHint.textContent=`Старая цена ${money(original)}; скидка ${money(discount||original-current)} рассчитана автоматически.`;
-    }else if(v.status==='STRUCTURED'||v.status==='WEB_VERIFIED'){
+    }else if(v.status==='STRUCTURED'||v.status==='WEB_VERIFIED'||v.status==='BROWSER_DOM'){
       els.priceVerificationHint.className='price-verification-hint verified';
-      els.priceVerificationHint.textContent=v.status==='WEB_VERIFIED'?`✓ Цена ${money(current)} подтверждена на точной странице товара.`:`✓ Цена ${money(current)} подтверждена структурированными данными магазина.`;
+      els.priceVerificationHint.textContent=v.status==='WEB_VERIFIED'?`✓ Цена ${money(current)} подтверждена на точной странице товара.`:v.status==='BROWSER_DOM'?`✓ Цена ${money(current)} прочитана прямо из открытой вкладки браузера.`:`✓ Цена ${money(current)} подтверждена структурированными данными магазина.`;
     }else if(v.status==='CONFLICT'||v.status==='UNVERIFIED_TOUCH'||v.status==='UNVERIFIED_PRICE'){
       els.priceVerificationHint.className='price-verification-hint conflict';
       els.priceVerificationHint.textContent=v.status==='UNVERIFIED_TOUCH'?'⚠ Touch не подтвердил текущую цену. Старая цена заблокирована — проверь и введи цену вручную.':'⚠ Магазин отдал конфликтующие цены. Проверь цену на сайте перед сохранением.';
@@ -394,8 +427,24 @@ function resetEditor(){
 }
 function openEditor(id=null){
   resetEditor();
-  if(id){ const x=state.items.find(v=>v.id===id); if(!x)return; els.itemId.value=x.id;els.urlInput.value=x.url||'';els.titleInput.value=x.title||'';els.priceInput.value=x.price||'';els.savedInput.value=x.saved||'';els.categoryInput.value=x.category||'Другое';els.priorityInput.value=String(x.priority||2);els.statusInput.value=x.status||'want';els.storeInput.value=x.store||'';els.variantInput.value=x.variant||'';els.imageInput.value=validImageUrl(x.image||'');els.noteInput.value=x.note||'';setPriceVerification({price:x.price,originalPrice:x.originalPrice,discountAmount:x.discountAmount,priceVerification:{status:x.priceVerificationStatus,source:x.priceVerificationSource,checkedAt:x.priceCheckedAt}});els.deleteItem.classList.remove('hidden');els.editorTitle.textContent='Карточка желания';els.fetchPreview.classList.remove('hidden');els.fetchPreview.textContent='✦ Подтянуть снова';els.fetchMessage.textContent=x.priceVerificationStatus==='VERIFIED'?'Цена сохранена и была подтверждена бесплатной арифметикой. Нажми «Подтянуть снова», чтобы перепроверить сайт.':'Цена сохранена в «Хочу». Нажми «Подтянуть снова», чтобы перепроверить цену на сайте.';loadPriceHistory(x.id); }
+  if(id){ const x=state.items.find(v=>v.id===id); if(!x)return; els.itemId.value=x.id;els.urlInput.value=x.url||'';els.titleInput.value=x.title||'';els.priceInput.value=x.price||'';els.savedInput.value=x.saved||'';els.categoryInput.value=x.category||'Другое';els.priorityInput.value=String(x.priority||2);els.statusInput.value=x.status||'want';els.storeInput.value=x.store||'';els.variantInput.value=x.variant||'';els.imageInput.value=validImageUrl(x.image||'');els.noteInput.value=x.note||'';setPriceVerification({price:x.price,originalPrice:x.originalPrice,discountAmount:x.discountAmount,priceVerification:{status:x.priceVerificationStatus,source:x.priceVerificationSource,checkedAt:x.priceCheckedAt}});els.deleteItem.classList.remove('hidden');els.editorTitle.textContent='Карточка желания';els.fetchPreview.classList.remove('hidden');els.fetchPreview.textContent='✦ Подтянуть снова';els.fetchMessage.textContent=x.priceVerificationStatus==='VERIFIED'?'Цена сохранена и была подтверждена бесплатной арифметикой. Нажми «Подтянуть снова», чтобы перепроверить сайт.':x.priceVerificationStatus==='BROWSER_DOM'?'Цена была прочитана из открытой вкладки расширением «В Хочу».':'Цена сохранена в «Хочу». Нажми «Подтянуть снова», чтобы перепроверить цену на сайте.';loadPriceHistory(x.id); }
   updatePreview(); updateSiteLink(); els.editor.showModal();
+}
+function applyPendingProductImport(){
+  const data=state.pendingProductImport;if(!state.me||!data)return false;
+  openEditor();
+  const price=Number(data.price||0),original=Number(data.originalPrice||0),reportedDiscount=Number(data.discountAmount||0);
+  const hasSale=price>0&&original>price;
+  const discount=hasSale?(reportedDiscount>0?reportedDiscount:Math.round((original-price)*100)/100):0;
+  const exactArithmetic=hasSale&&reportedDiscount>0&&Math.abs(original-reportedDiscount-price)<=.01&&data.arithmeticVerified;
+  const status=exactArithmetic?'VERIFIED':hasSale?'SALE_PAIR':price>0?'BROWSER_DOM':'';
+  els.urlInput.value=data.url||'';els.titleInput.value=data.title||'';els.priceInput.value=price||'';els.savedInput.value='';
+  els.storeInput.value=data.store||STORE_NAMES[data.storeDomain]||data.storeDomain||'';els.variantInput.value=data.variant||'';els.imageInput.value=validImageUrl(data.image||'');
+  setPriceVerification({price,originalPrice:hasSale?original:null,discountAmount:hasSale?discount:null,priceVerification:{status,source:`browser-extension:${data.adapter||'dom'}`,checkedAt:!Number.isNaN(Date.parse(data.extractedAt))?new Date(data.extractedAt).toISOString():new Date().toISOString()}});
+  els.fetchMessage.textContent=price?`Получено прямо из открытой вкладки: ${money(price)}. Railway и AI не использовались.`:'Расширение передало карточку, но не нашло цену — проверь страницу и введи цену вручную.';
+  els.fetchMessage.title=`Источник: ${data.adapter||'браузер'}${data.evidence?.length?` · ${data.evidence.join(' · ')}`:''}`;
+  state.pendingProductImport=null;try{sessionStorage.removeItem(PRODUCT_IMPORT_SESSION)}catch{}
+  updatePreview();updateSiteLink();return true;
 }
 function updatePreview(){
   const title=els.titleInput.value.trim()||'Новое желание',price=Number(els.priceInput.value||0),saved=Number(els.savedInput.value||0),pct=price?clamp(saved/price*100,0,100):0,img=validImageUrl(els.imageInput.value),store=els.storeInput.value.trim()||'Магазин',variant=els.variantInput.value.trim();
@@ -403,7 +452,7 @@ function updatePreview(){
   els.previewTitle.textContent=title;els.previewStoreBadge.textContent=variant?`${store} · ${variant}`:store;els.previewPrice.textContent=money(price);els.previewSaved.textContent=money(saved);els.previewProgressBar.style.width=`${pct}%`;els.previewProgressText.textContent=`${Math.round(pct)}%`;
   const original=Number(els.originalPriceInput?.value||0),discount=Number(els.discountAmountInput?.value||0),verification=els.priceVerificationStatusInput?.value||'';
   const showSale=price>0&&original>price;
-  if(els.previewSaleMeta){els.previewSaleMeta.classList.toggle('hidden',!showSale);if(showSale){els.previewOriginalPrice.textContent=money(original);els.previewDiscount.textContent=`−${money(discount||original-price)}`;els.previewPriceStatus.textContent=verification==='VERIFIED'?'✓ проверено':'скидка';}}
+  if(els.previewSaleMeta){els.previewSaleMeta.classList.toggle('hidden',!showSale);if(showSale){els.previewOriginalPrice.textContent=money(original);els.previewDiscount.textContent=`−${money(discount||original-price)}`;els.previewPriceStatus.textContent=verification==='VERIFIED'?'✓ проверено':verification==='BROWSER_DOM'?'✓ браузер':'скидка';}}
   els.previewRemaining.textContent=!price?'Укажи цену':funded?'Деньги собраны ✓':`Осталось ${money(left)}`;
   els.previewRemaining.classList.toggle('funded',funded);
   els.savingsHint.innerHTML=!price?'Укажи цену и сумму накоплений — покажу, сколько осталось.':funded?`<b>Деньги собраны ✓</b> На покупку хватает. Ты накопил ${money(saved)}.`:`Осталось накопить <b>${money(left)}</b> · готово ${Math.round(pct)}%.`;
@@ -499,7 +548,7 @@ els.loginForm.addEventListener('submit',async e=>{
   els.loginMessage.textContent='Проверяю…';
   try{
     const d=await api('/api/login',{method:'POST',credentials:'same-origin',body:JSON.stringify({login,password})});
-    state.me=d.user; els.passwordInput.value=''; els.loginMessage.textContent=''; updateProfile(); showApp(); await loadItems();
+    state.me=d.user; els.passwordInput.value=''; els.loginMessage.textContent=''; updateProfile(); showApp(); await loadItems(); applyPendingProductImport();
     if(state.me?.role==='admin') await refreshAdminBadge();
   }catch(err){ els.loginMessage.textContent=err.message; }
 });
@@ -611,7 +660,7 @@ window.addEventListener('appinstalled',()=>{deferredInstallPrompt=null;updateIns
 if('serviceWorker' in navigator){
   window.addEventListener('load',async()=>{
     try{
-      const reg=await navigator.serviceWorker.register('/sw.js?v=1.4.1',{updateViaCache:'none'});
+      const reg=await navigator.serviceWorker.register('/sw.js?v=1.5.0',{updateViaCache:'none'});
       await reg.update();
     }catch{}
   });

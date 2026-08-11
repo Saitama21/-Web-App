@@ -1,6 +1,6 @@
 {
   "name": "hochu-wishlist-webapp",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "check": "node --check server.js && node --check public/app.js",
+    "check": "node --check server.js && node --check public/app.js && node --check browser-extension/background.js && node --check browser-extension/extractor.js && node --check browser-extension/options.js && node -e \"JSON.parse(require('fs').readFileSync('browser-extension/manifest.json','utf8'))\"",
     "test:parser": "node --test tests/makeup-image-parser.test.mjs",
     "test:price": "node --test tests/price-history.test.mjs tests/price-validator.test.mjs",
     "test:image": "node --test tests/generic-image-ranking.test.mjs",
