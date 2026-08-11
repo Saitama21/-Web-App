@@ -1,10 +1,13 @@
 const BADGE_TIMEOUT = 2600;
+const api = globalThis.browser || globalThis.chrome;
+const DEFAULT_APP_URL = 'https://web-app-production-22f3.up.railway.app/';
+const isSafari = /Safari/i.test(globalThis.navigator?.userAgent || '') && !/Chrome|Chromium|CriOS/i.test(globalThis.navigator?.userAgent || '');
 
 function setBadge(text, color, title) {
-  chrome.action.setBadgeBackgroundColor({ color }).catch(() => {});
-  chrome.action.setBadgeText({ text }).catch(() => {});
-  if (title) chrome.action.setTitle({ title }).catch(() => {});
-  setTimeout(() => chrome.action.setBadgeText({ text: '' }).catch(() => {}), BADGE_TIMEOUT);
+  Promise.resolve(api.action.setBadgeBackgroundColor({ color })).catch(() => {});
+  Promise.resolve(api.action.setBadgeText({ text })).catch(() => {});
+  if (title) Promise.resolve(api.action.setTitle({ title })).catch(() => {});
+  setTimeout(() => Promise.resolve(api.action.setBadgeText({ text: '' })).catch(() => {}), BADGE_TIMEOUT);
 }
 
 function normalizedAppUrl(value = '') {
@@ -27,19 +30,21 @@ function encodePayload(value) {
 }
 
 async function configuredAppUrl() {
-  const stored = await chrome.storage.sync.get({ appUrl: '' });
-  return normalizedAppUrl(stored.appUrl);
+  const stored = await api.storage.sync.get({ appUrl: DEFAULT_APP_URL });
+  return normalizedAppUrl(stored.appUrl) || DEFAULT_APP_URL;
 }
 
-chrome.runtime.onInstalled.addListener(async details => {
-  if (details.reason === 'install') await chrome.runtime.openOptionsPage();
+api.runtime.onInstalled.addListener(async details => {
+  if (details.reason !== 'install') return;
+  const stored = await api.storage.sync.get({ appUrl: '' });
+  if (!normalizedAppUrl(stored.appUrl)) await api.storage.sync.set({ appUrl: DEFAULT_APP_URL });
 });
 
-chrome.action.onClicked.addListener(async tab => {
+api.action.onClicked.addListener(async tab => {
   const appUrl = await configuredAppUrl();
   if (!appUrl) {
     setBadge('!', '#d97706', 'Сначала укажи адрес приложения «Хочу»');
-    await chrome.runtime.openOptionsPage();
+    if (api.runtime.openOptionsPage) await api.runtime.openOptionsPage();
     return;
   }
   if (!tab?.id || !/^https?:/i.test(tab.url || '')) {
@@ -48,7 +53,7 @@ chrome.action.onClicked.addListener(async tab => {
   }
 
   try {
-    const execution = await chrome.scripting.executeScript({
+    const execution = await api.scripting.executeScript({
       target: { tabId: tab.id },
       files: ['extractor.js']
     });
@@ -56,14 +61,14 @@ chrome.action.onClicked.addListener(async tab => {
     if (!product?.url || !product?.title) throw new Error('Карточка товара не распознана');
     const payload = {
       version: 1,
-      origin: 'hochu-chrome-extension',
-      extensionVersion: chrome.runtime.getManifest().version,
+      origin: isSafari ? 'hochu-safari-extension' : 'hochu-browser-extension',
+      extensionVersion: api.runtime.getManifest().version,
       extractedAt: new Date().toISOString(),
       ...product
     };
     const target = new URL(appUrl);
     target.hash = `import=${encodePayload(payload)}`;
-    await chrome.tabs.create({ url: target.href });
+    await api.tabs.create({ url: target.href });
     setBadge(product.price ? '✓' : '?', product.price ? '#059669' : '#d97706', product.price ? `Цена ${product.price} ₴ передана в «Хочу»` : 'Карточка передана без цены');
   } catch (error) {
     setBadge('!', '#dc2626', error?.message || 'Не удалось прочитать карточку');

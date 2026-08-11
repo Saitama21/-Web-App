@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "В Хочу",
-  "description": "Передаёт открытую карточку товара прямо в журнал покупок «Хочу».",
-  "version": "1.0.0",
+  "description": "Передаёт открытую карточку товара прямо в журнал покупок «Хочу» — без AI для уже видимой цены.",
+  "version": "1.1.0",
   "permissions": ["activeTab", "scripting", "storage"],
   "background": {
     "service_worker": "background.js"

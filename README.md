@@ -1,6 +1,23 @@
-# Хочу v1.5.0
+# Хочу v1.6.0
 
 Личный журнал желаний и покупок для Railway + PostgreSQL.
+
+## Что изменилось в v1.6.0
+
+- Расширение **«В Хочу»** теперь единое для Chrome и Safari и работает с тем же бесплатным DOM-экстрактором цены.
+- Добавлен безопасный импорт из iOS «Команд»: `/add?source=ios-shortcut&share_url=...`.
+- Добавлен Android Web Share Target: после установки PWA пункт «Хочу» появляется в системном меню «Поделиться».
+- Мобильная ссылка сохраняется до входа, удаляется из адресной строки до проверки и запускает существующий `/api/product-preview` только один раз.
+- Источник Safari/Chrome с готовой ценой по-прежнему не вызывает Railway и OpenAI; подтверждённая арифметика не перезаписывается AI.
+- Инструкции находятся в `mobile/ios-shortcut`, `mobile/android` и `browser-extension/SAFARI.md`.
+
+## Расширения браузера
+
+- Chrome на Mac: загрузи папку `browser-extension` через `chrome://extensions`.
+- Safari на Mac для временной проверки: Safari → Настройки → Разработчик → Add Temporary Extension и выбери папку `browser-extension`.
+- Safari на iPhone/iPad и постоянная установка на Mac: упакуй эту же папку через Apple Safari Web Extension Packager; готовые команды есть в `browser-extension/SAFARI.md`.
+
+Расширение запрашивает только `activeTab`, `scripting` и `storage`. Оно читает только активную страницу после ручного нажатия.
 
 ## Что изменилось в v1.5.0
 

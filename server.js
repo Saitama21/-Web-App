@@ -12,7 +12,7 @@ function envNumber(name,fallback){const raw=process.env[name];if(raw===undefined
 const { Pool } = pg;
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
-const VERSION = '1.5.0';
+const VERSION = '1.6.0';
 const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '').trim();
 const AI_INSPECTOR_MODEL = String(process.env.AI_INSPECTOR_MODEL || 'gpt-5-mini').trim() || 'gpt-5-mini';
 const AI_INSPECTOR_FALLBACK_MODEL = String(process.env.AI_INSPECTOR_FALLBACK_MODEL || 'gpt-5.6-terra').trim() || 'gpt-5.6-terra';
