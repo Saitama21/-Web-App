@@ -12,7 +12,7 @@ function envNumber(name,fallback){const raw=process.env[name];if(raw===undefined
 const { Pool } = pg;
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
-const VERSION = '1.3.2';
+const VERSION = '1.3.3';
 const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '').trim();
 const AI_INSPECTOR_MODEL = String(process.env.AI_INSPECTOR_MODEL || 'gpt-5-mini').trim() || 'gpt-5-mini';
 const AI_INSPECTOR_FALLBACK_MODEL = String(process.env.AI_INSPECTOR_FALLBACK_MODEL || 'gpt-5.6-terra').trim() || 'gpt-5.6-terra';
@@ -1612,6 +1612,33 @@ async function readerFallback(productUrl, domain='') {
     return {...parsed,inspectorTexts:[String(text||'').slice(0,140000)]};
   } catch { return {}; }
 }
+
+function touchAlternateProductUrls(productUrl='') {
+  try {
+    const u=new URL(productUrl);
+    const urls=[u.href];
+    // Touch publishes the same SKU in Ukrainian and Russian routes. Their CDN can
+    // intermittently serve stale/minimal HTML for one locale while the other route
+    // still contains the live sale block, so read both before declaring the price unknown.
+    if(/^\/ua\/item\//i.test(u.pathname)) {
+      const ru=new URL(u.href); ru.pathname=u.pathname.replace(/^\/ua\//i,'/'); urls.push(ru.href);
+    } else if(/^\/item\//i.test(u.pathname)) {
+      const ua=new URL(u.href); ua.pathname=`/ua${u.pathname}`; urls.push(ua.href);
+    }
+    return [...new Set(urls)];
+  } catch { return [productUrl]; }
+}
+
+async function touchProductReaderFallback(productUrl='') {
+  let out={};
+  for(const candidate of touchAlternateProductUrls(productUrl)) {
+    const parsed=await readerFallback(candidate,'touch.com.ua');
+    out=mergeProduct(out,{...parsed,canonicalUrl:productUrl});
+    const verified=(out.priceFacts||[]).some(f=>['VERIFIED','SALE_PAIR'].includes(validatePriceArithmetic(f).status));
+    if(verified) break;
+  }
+  return out;
+}
 async function microlinkFallback(productUrl) {
   try {
     const endpoint = `https://api.microlink.io/?url=${encodeURIComponent(productUrl)}`;
@@ -2011,7 +2038,10 @@ app.post('/api/product-preview', requireAuth, rateLimit('product-preview',18,60_
   } else {
     const suspiciousImage=!result.image || productImageNegative(result.image);
     const priceNeedsReader=shouldRunReaderPriceCheck(info.domain,result);
-    if (qualityOf(result) !== 'complete' || suspiciousImage || priceNeedsReader) result = mergeProduct(result, await readerFallback(url,info.domain));
+    if (qualityOf(result) !== 'complete' || suspiciousImage || priceNeedsReader) {
+      const reader=info.domain==='touch.com.ua' ? await touchProductReaderFallback(url) : await readerFallback(url,info.domain);
+      result = mergeProduct(result, reader);
+    }
     if (qualityOf(result) !== 'complete') result = mergeProduct(result, await microlinkFallback(url));
   }
 
@@ -2071,7 +2101,7 @@ app.post('/api/product-preview', requireAuth, rateLimit('product-preview',18,60_
 
 app.get('*', (req, res) => res.sendFile(`${process.cwd()}/public/index.html`));
 
-export { parseMakeupReaderMarkdown, parseMakeupSearchHtml, parseMakeupSearchText, rankMakeupImages, makeupImageScore, parseHtmlProduct, rankGenericProductImages, genericProductImageScore, genericCurrentPrice, promotionalCurrentPrice, parseReaderMarkdown, validateAvatarDataUrl, imageDimensionsFromBuffer, priceHistorySummary, shouldRunReaderPriceCheck, reconcileDeterministicPrice, buildAiInspectorEvidence, shouldRunAiProductInspector, productPriceReliable, eligibleCurrentPrices, classifyOpenAiFailure };
+export { parseMakeupReaderMarkdown, parseMakeupSearchHtml, parseMakeupSearchText, rankMakeupImages, makeupImageScore, parseHtmlProduct, rankGenericProductImages, genericProductImageScore, genericCurrentPrice, promotionalCurrentPrice, parseReaderMarkdown, touchAlternateProductUrls, validateAvatarDataUrl, imageDimensionsFromBuffer, priceHistorySummary, shouldRunReaderPriceCheck, reconcileDeterministicPrice, buildAiInspectorEvidence, shouldRunAiProductInspector, productPriceReliable, eligibleCurrentPrices, classifyOpenAiFailure };
 
 if (process.env.HOCHU_TEST !== '1') {
   initDb().then(() => {

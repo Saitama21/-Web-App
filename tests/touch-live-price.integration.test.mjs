@@ -5,10 +5,12 @@ process.env.HOCHU_TEST='1';
 
 const {
   parseHtmlProduct,
+  parseReaderMarkdown,
   reconcileDeterministicPrice,
   buildAiInspectorEvidence,
   shouldRunAiProductInspector,
   productPriceReliable,
+  touchAlternateProductUrls,
   classifyOpenAiFailure
 }=await import('../server.js');
 
@@ -40,6 +42,22 @@ test('Touch blocks a lone stale price instead of asking AI to guess',()=>{
   const evidence=buildAiInspectorEvidence(stale,TOUCH_URL,'touch.com.ua');
   assert.equal(productPriceReliable(stale,'touch.com.ua'),false);
   assert.equal(shouldRunAiProductInspector(stale,evidence,'touch.com.ua'),false);
+});
+
+test('Touch retries the same SKU through its second locale route',()=>{
+  const urls=touchAlternateProductUrls(TOUCH_URL);
+  assert.equal(urls.length,2);
+  assert.equal(urls[0],TOUCH_URL);
+  assert.equal(urls[1],TOUCH_URL.replace('/ua/item/','/item/'));
+});
+
+test('Touch reader format with line breaks still verifies the current sale price',()=>{
+  const markdown=`# Графічний монітор Huion Kamvas 13 Gen3 Black\n* * 21599 ₴ -7100 ₴\n\n14 499 ₴`;
+  const result=reconcileDeterministicPrice(parseReaderMarkdown(markdown,TOUCH_URL));
+  assert.equal(result.price,14499);
+  assert.equal(result.originalPrice,21599);
+  assert.equal(result.discountAmount,7100);
+  assert.equal(result.priceVerification.status,'VERIFIED');
 });
 
 test('OpenAI errors are classified for honest UI status',()=>{

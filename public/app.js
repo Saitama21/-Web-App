@@ -29,7 +29,7 @@ const params = new URLSearchParams(location.search);
 const state = {
   items: [], view: 'home', homeStatus: 'all', theme: localStorage.getItem('hochu-theme') || 'system',
   me: null, inviteToken: params.get('invite') || '', resetToken: params.get('reset') || '',
-  version:'1.3.2', aiInspector:null, admin: { overview:null, users:[], requests:[], resets:[] }
+  version:'1.3.3', aiInspector:null, admin: { overview:null, users:[], requests:[], resets:[] }
 };
 
 const els = {
@@ -201,7 +201,7 @@ function updateProfile(){
   const u=state.me; if(!u)return;
   els.profileName.textContent=u.name||u.username; setAvatarElement(els.profileAvatar,u); setAvatarElement(els.profileAvatarPreview,u);
   els.profileRole.textContent=u.role==='admin'?'администратор':'личный журнал'; els.nameSetting.value=u.name||''; els.accountSetting.value=`${u.username} · ${u.email}`;
-  if(els.appVersionBadge) els.appVersionBadge.textContent=`v${state.version||'1.3.2'}`; if(els.mobileVersionBadge) els.mobileVersionBadge.textContent=`v${state.version||'1.3.2'}`;
+  if(els.appVersionBadge) els.appVersionBadge.textContent=`v${state.version||'1.3.3'}`; if(els.mobileVersionBadge) els.mobileVersionBadge.textContent=`v${state.version||'1.3.3'}`;
   els.removeAvatar?.classList.toggle('hidden',!safeAvatarData(u.avatar));
   els.adminNavItem.classList.toggle('hidden',u.role!=='admin'); els.adminSettingsCard.classList.toggle('hidden',u.role!=='admin');
 }
@@ -607,7 +607,7 @@ window.addEventListener('appinstalled',()=>{deferredInstallPrompt=null;updateIns
 if('serviceWorker' in navigator){
   window.addEventListener('load',async()=>{
     try{
-      const reg=await navigator.serviceWorker.register('/sw.js?v=1.3.2',{updateViaCache:'none'});
+      const reg=await navigator.serviceWorker.register('/sw.js?v=1.3.3',{updateViaCache:'none'});
       await reg.update();
     }catch{}
   });
