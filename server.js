@@ -12,7 +12,7 @@ function envNumber(name,fallback){const raw=process.env[name];if(raw===undefined
 const { Pool } = pg;
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
-const VERSION = '1.4.0';
+const VERSION = '1.4.1';
 const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '').trim();
 const AI_INSPECTOR_MODEL = String(process.env.AI_INSPECTOR_MODEL || 'gpt-5-mini').trim() || 'gpt-5-mini';
 const AI_INSPECTOR_FALLBACK_MODEL = String(process.env.AI_INSPECTOR_FALLBACK_MODEL || 'gpt-5.6-terra').trim() || 'gpt-5.6-terra';
@@ -762,14 +762,93 @@ function collectStructuredPriceFacts($,products=[],pageUrl='') {
   return facts;
 }
 
+function extractTouchSku(pageUrl='',products=[]) {
+  const fromUrl=[...String(pageUrl).matchAll(/-(\d{5,})(?=-|\/|$)/g)].map(x=>x[1]);
+  const fromSchema=[];
+  for(const product of products||[]) {
+    for(const value of [product?.sku,product?.productID,product?.productId]) {
+      const id=String(value||'').trim();
+      if(/^\d{5,}$/.test(id)) fromSchema.push(id);
+    }
+  }
+  return fromUrl.at(-1)||fromSchema[0]||'';
+}
+
+function collectTouchInlinePriceFacts($,products=[],pageUrl='') {
+  let hostname='';
+  try { hostname=new URL(pageUrl).hostname.replace(/^www\./,'').toLowerCase(); } catch {}
+  if(hostname!=='touch.com.ua') return [];
+
+  const sku=extractTouchSku(pageUrl,products);
+  if(!sku) return [];
+  const ids=new Set([sku]);
+  for(const product of products||[]) {
+    for(const value of [product?.sku,product?.mpn,product?.productID,product?.productId]) {
+      const id=String(value||'').trim();
+      if(/^\d{5,}$/.test(id)) ids.add(id);
+    }
+  }
+  $('#catalogElement[data-product-id],.h2o_trackprod_popup_link.changeID[data-id],.banks_list[data-productid]').slice(0,30).each((_,el)=>{
+    for(const attr of ['data-product-id','data-productid','data-id']) {
+      const id=String($(el).attr(attr)||'').trim();
+      if(/^\d{5,}$/.test(id)) ids.add(id);
+    }
+  });
+
+  const oldPrices=collectOldDomPricesWithin($,productDomScope($));
+  const byFamily=new Map();
+  const add=(family,value)=>{
+    const price=numericPrice(value);
+    if(!price||price>100_000_000||oldPrices.some(old=>Math.abs(old-price)<=.01)) return;
+    const values=byFamily.get(family)||new Set();
+    values.add(Number(price).toFixed(2));
+    byFamily.set(family,values);
+  };
+  $('script:not([type="application/ld+json"])').slice(0,220).each((_,el)=>{
+    const raw=$(el).contents().text();
+    if(!raw||raw.length>3_000_000||/agec_detail_base/i.test(raw)) return;
+    const hasId=label=>[...ids].some(id=>new RegExp(`\\b${label}\\s*[:=]\\s*['\"]?${id}(?:['\"]|\\b)`,'i').test(raw));
+    const prices=[...raw.matchAll(/\b(?:price|value)\s*:\s*['"]?(\d[\d\s.,]{1,18})/gi)].map(m=>numericPrice(m[1])).filter(Boolean);
+    const unique=[...new Set(prices.map(x=>Number(x).toFixed(2)))];
+    if(unique.length===1) {
+      if(hasId('content_ids?')) add('pixel-content',unique[0]);
+      if(hasId('productKey')||hasId('product_key')) add('esputnik-product',unique[0]);
+      if(/window\.ad_product\b/i.test(raw)&&[...ids].some(id=>raw.includes(id))) add('ad-product',unique[0]);
+    }
+    const bank=raw.match(/initBanksInItem\s*=\s*function\s*\(\s*sum\s*=\s*['"]([^'"]+)['"]/i);
+    if(bank) add('checkout-banks',bank[1]);
+  });
+
+  const grouped=new Map();
+  for(const [family,values] of byFamily) {
+    // A source family that contradicts itself is not evidence.
+    if(values.size!==1) continue;
+    const value=[...values][0];
+    const families=grouped.get(value)||[];
+    families.push(family);
+    grouped.set(value,families);
+  }
+  return [...grouped.entries()].map(([value,families])=>({
+    currentPrice:Number(value),
+    source:`html:touch-inline:${families.join('+')}`,
+    confidence:Math.min(.98,.82+.045*families.length),
+    authoritative:families.length>=2,
+    evidenceCount:families.length,
+    signals:families,
+    currency:'UAH',
+    exactSku:sku
+  })).sort((a,b)=>Number(b.authoritative)-Number(a.authoritative)||b.evidenceCount-a.evidenceCount||b.confidence-a.confidence);
+}
+
 function shouldRunReaderPriceCheck(domain='', result={}) {
   // Touch renders the payable sale price separately from the server-side Product/Offer data.
   // A direct fetch can therefore look "complete" while containing only the old price. Force
   // the rendered-reader pass until the direct page has already supplied a trustworthy sale pair.
   if(String(domain).toLowerCase()!=='touch.com.ua') return false;
+  if(result.priceConflict||result.priceVerification?.conflict) return true;
   return !(result.priceFacts||[]).some(fact=>{
     const status=validatePriceArithmetic(fact).status;
-    return status==='VERIFIED'||status==='SALE_PAIR'||(fact?.authoritative&&Number(fact?.confidence||0)>=.82&&!fact?.oldVeto);
+    return status==='VERIFIED'||status==='SALE_PAIR'||(fact?.authoritative&&Number(fact?.confidence||0)>=.82&&Number(fact?.evidenceCount||0)>=2&&!fact?.oldVeto);
   });
 }
 
@@ -1500,9 +1579,10 @@ function parseHtmlProduct(html, pageUrl) {
   const rankedImages=collectGenericProductImageCandidates($,p,pageUrl,title);
   const bodyPriceFacts=promotionalPriceFacts(cleanText(productDomScope($).text()).slice(0,360000));
   const structuredPriceFacts=collectStructuredPriceFacts($,products,pageUrl);
+  const inlinePriceFacts=collectTouchInlinePriceFacts($,products,pageUrl);
   const liveDomPrice=bodyPriceFacts?.currentPrice || genericCurrentPrice($,p);
   const domSalePairFacts=bodyPriceFacts || genericDomSalePairFacts($,liveDomPrice);
-  const authoritativeValues=[...new Set(structuredPriceFacts.filter(x=>x.authoritative).map(x=>Number(x.currentPrice).toFixed(2)))];
+  const authoritativeValues=[...new Set([...structuredPriceFacts,...inlinePriceFacts].filter(x=>x.authoritative).map(x=>Number(x.currentPrice).toFixed(2)))];
   const structuredPriceConflict=!domSalePairFacts&&authoritativeValues.length>1;
   let data = {
     title,
@@ -1516,10 +1596,11 @@ function parseHtmlProduct(html, pageUrl) {
     )),
     priceFacts: [
       ...(domSalePairFacts ? [{...domSalePairFacts,source:`html:${domSalePairFacts.source||'price'}`}] : []),
+      ...inlinePriceFacts,
       ...structuredPriceFacts
     ],
     priceConflict:structuredPriceConflict,
-    structuredPriceCandidates:structuredPriceFacts,
+    structuredPriceCandidates:[...inlinePriceFacts,...structuredPriceFacts],
     canonicalUrl: first($('link[rel="canonical"]').attr('href'), pageUrl),
     source: ['html']
   };
@@ -1747,6 +1828,47 @@ function touchAlternateProductUrls(productUrl='') {
   } catch { return [productUrl]; }
 }
 
+function touchFreshProductUrls(productUrl='',now=Date.now()) {
+  const bucket=Math.floor(Number(now||Date.now())/300_000);
+  return touchAlternateProductUrls(productUrl).map(value=>{
+    try {
+      const url=new URL(value);
+      // A neutral, time-bucketed query creates a fresh CDN cache key without using
+      // Bitrix's destructive clear_cache switch. One key is reused for five minutes.
+      url.searchParams.set('__hochu_price_probe',String(bucket));
+      return url.href;
+    } catch { return value; }
+  });
+}
+
+async function touchFreshHtmlFallback(productUrl='') {
+  let out={};
+  for(const candidate of touchFreshProductUrls(productUrl)) {
+    try {
+      const response=await fetch(candidate,{
+        redirect:'follow',
+        headers:{
+          'user-agent':'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150 Safari/537.36',
+          'accept-language':'uk-UA,uk;q=0.9,ru;q=0.8,en;q=0.7',
+          accept:'text/html,application/xhtml+xml',
+          'cache-control':'no-cache, no-store',
+          pragma:'no-cache',
+          referer:productUrl
+        },
+        signal:AbortSignal.timeout(15000)
+      });
+      if(!response.ok) continue;
+      const html=await response.text();
+      if(looksLikeChallenge(html)) continue;
+      const inspectorText=cleanText(cheerio.load(html)('body').text()).slice(0,140000);
+      out=mergeProduct(out,{...parseHtmlProduct(html,response.url),canonicalUrl:productUrl,inspectorTexts:inspectorText?[inspectorText]:[],source:['touch-fresh-html']});
+      const provisional=reconcileDeterministicPrice({...out,priceFacts:[...(out.priceFacts||[])]});
+      if(productPriceReliable(provisional,'touch.com.ua')) break;
+    } catch {}
+  }
+  return out;
+}
+
 async function touchProductReaderFallback(productUrl='') {
   let out={};
   for(const candidate of touchAlternateProductUrls(productUrl)) {
@@ -1767,14 +1889,56 @@ async function microlinkFallback(productUrl) {
   } catch { return {}; }
 }
 
+function normalizedPriceFact(fact={}) {
+  const checked=validatePriceArithmetic(fact);
+  const confidence=Math.max(0,Math.min(1,Number(fact?.confidence)||0));
+  const authoritative=Boolean(fact?.authoritative)&&!fact?.oldVeto;
+  const structured=checked.status==='CURRENT_ONLY'&&authoritative&&confidence>=.82;
+  return {...checked,...fact,status:structured?'STRUCTURED':checked.status,confidence,authoritative};
+}
+
+function priceEvidenceConflict(facts=[],best=null,previousConflict=false) {
+  if(!best?.currentPrice) return Boolean(previousConflict);
+  const normalized=(facts||[]).map(normalizedPriceFact).filter(x=>x.currentPrice&&!x.oldVeto);
+  const differs=x=>Math.abs(Number(x.currentPrice)-Number(best.currentPrice))>.01;
+  const rivals=normalized.filter(differs);
+  if(!rivals.length) return false;
+
+  // A complete old − discount = current proof (or a visible old/current pair) is
+  // allowed to overrule stale JSON-LD/meta data. Only a second equally direct sale
+  // proof for another value keeps the conflict unresolved.
+  if(best.status==='VERIFIED'||best.status==='SALE_PAIR') {
+    return rivals.some(x=>x.status==='VERIFIED'||x.status==='SALE_PAIR');
+  }
+
+  if(best.status==='STRUCTURED') {
+    const support=new Map();
+    for(const fact of normalized) {
+      if(!['VERIFIED','SALE_PAIR','STRUCTURED'].includes(fact.status)) continue;
+      const key=Number(fact.currentPrice).toFixed(2);
+      const evidence=Math.max(1,Math.min(5,Number(fact.evidenceCount)||1));
+      const weight=(fact.status==='VERIFIED'?8:fact.status==='SALE_PAIR'?5:evidence)+fact.confidence;
+      support.set(key,(support.get(key)||0)+weight);
+    }
+    const bestSupport=support.get(Number(best.currentPrice).toFixed(2))||0;
+    const rivalSupport=Math.max(0,...[...support.entries()].filter(([key])=>key!==Number(best.currentPrice).toFixed(2)).map(([,value])=>value));
+    // Independent exact-SKU sources may resolve one stale structured value. Ties
+    // and near-ties stay blocked, preserving the guard used for unknown stores.
+    return !(bestSupport>=3&&bestSupport>=rivalSupport*1.45);
+  }
+  return Boolean(previousConflict)||rivals.some(x=>['VERIFIED','SALE_PAIR','STRUCTURED'].includes(x.status));
+}
+
 function reconcileDeterministicPrice(result={}) {
   const facts=[...(result.priceFacts||[])];
   const parserPrice=numericPrice(result.price);
   if(parserPrice) facts.push({currentPrice:parserPrice,source:'parser-current'});
   const best=pickBestPriceFact(facts,parserPrice);
+  const conflict=priceEvidenceConflict(facts,best,result.priceConflict);
   if(best?.currentPrice) result.price=best.currentPrice;
   result.originalPrice=best?.originalPrice||null;
   result.discountAmount=best?.discountAmount||null;
+  result.priceConflict=conflict;
   result.priceVerification={
     status:best?.status||'CURRENT_ONLY',
     verified:Boolean(best?.verified),
@@ -1783,10 +1947,25 @@ function reconcileDeterministicPrice(result={}) {
     confidence:Number(best?.confidence||0),
     authoritative:Boolean(best?.authoritative),
     evidenceCount:Number(best?.evidenceCount||0),
-    conflict:Boolean(result.priceConflict),
+    conflict,
     checkedAt:new Date().toISOString()
   };
   return result;
+}
+
+function buildPriceDiagnostics(result={},domain='') {
+  const normalized=(result.priceFacts||[]).map(normalizedPriceFact).filter(x=>x.currentPrice);
+  const values=[...new Set(normalized.map(x=>Number(x.currentPrice).toFixed(2)))];
+  const verified=normalized.filter(x=>x.status==='VERIFIED'||x.status==='SALE_PAIR').length;
+  const structured=normalized.filter(x=>x.status==='STRUCTURED').length;
+  const prefix=String(domain||'shop').toLowerCase()==='touch.com.ua'?'TCH':'PRC';
+  return {
+    code:`${prefix}-V${verified}-S${structured}-N${values.length}-C${result.priceConflict||result.priceVerification?.conflict?1:0}`,
+    selected:numericPrice(result.price),
+    values:values.slice(0,8).map(Number),
+    verification:String(result.priceVerification?.status||''),
+    conflict:Boolean(result.priceConflict||result.priceVerification?.conflict)
+  };
 }
 
 function focusedInspectorText(text='', title='') {
@@ -2228,6 +2407,13 @@ app.post('/api/product-preview', requireAuth, rateLimit('product-preview',18,60_
       result.source=[...new Set([...(result.source||[]),...(micro.source||[])])];
     }
   } else {
+    if(info.domain==='touch.com.ua'&&shouldRunReaderPriceCheck(info.domain,result)) {
+      const fresh=await touchFreshHtmlFallback(url);
+      if(qualityOf(fresh)!=='none') result=mergeProduct(result,fresh);
+      // Reconcile here as well as at the final gate so a verified fresh response
+      // can clear a conflict inherited from the stale first response.
+      result=reconcileDeterministicPrice(result);
+    }
     const suspiciousImage=!result.image || productImageNegative(result.image);
     const priceNeedsReader=shouldRunReaderPriceCheck(info.domain,result);
     if (qualityOf(result) !== 'complete' || suspiciousImage || priceNeedsReader) {
@@ -2255,6 +2441,7 @@ app.post('/api/product-preview', requireAuth, rateLimit('product-preview',18,60_
   result = await inspectProductWithAi(result, url, info.domain);
 
   const priceReliable=productPriceReliable(result,info.domain);
+  const diagnostics=buildPriceDiagnostics(result,info.domain);
   const responsePrice=priceReliable?numericPrice(result.price):null;
   const responseVerification=priceReliable
     ? (result.priceVerification || {status:'CURRENT_ONLY',verified:false,source:'parser-current',reason:''})
@@ -2262,7 +2449,7 @@ app.post('/api/product-preview', requireAuth, rateLimit('product-preview',18,60_
   const quality = qualityOf({...result,price:responsePrice});
   const category = inferCategoryFromTitle(result.title, info.domain);
   let message;
-  if(!priceReliable&&info.domain==='touch.com.ua') message=result.aiInspector?.webSearchUsed?'Touch отдал противоречивую цену, а проверка точной страницы не смогла её подтвердить. Старая цена заблокирована.':'Touch не дал надёжно подтвердить текущую цену. Старая цена заблокирована и не подставлена.';
+  if(!priceReliable&&info.domain==='touch.com.ua') message=`${result.aiInspector?.webSearchUsed?'Touch отдал противоречивую цену, а проверка точной страницы не смогла её подтвердить. Старая цена заблокирована.':'Touch не дал надёжно подтвердить текущую цену. Старая цена заблокирована и не подставлена.'} Код: ${diagnostics.code}.`;
   else if(!priceReliable) message='Магазин отдал противоречивые данные о цене. Неподтверждённая цена заблокирована — проверь карточку вручную.';
   else if (quality === 'complete') message = result.priceVerification?.status==='VERIFIED'
     ? 'Готово. Цена подтверждена бесплатной арифметикой. AI не запускался, токены не списывались.'
@@ -2290,6 +2477,7 @@ app.post('/api/product-preview', requireAuth, rateLimit('product-preview',18,60_
     quality,
     message,
     blocked: directStatus === 403 || directStatus === 429,
+    diagnostics,
     inspector: result.aiInspector || await aiStatusSnapshot({used:false,skipped:true,skipReason:'not-needed',tokenFree:true}),
     sources: result.source || []
   });
@@ -2299,7 +2487,7 @@ app.post('/api/product-preview', requireAuth, rateLimit('product-preview',18,60_
 
 app.get('*', (req, res) => res.sendFile(`${process.cwd()}/public/index.html`));
 
-export { parseMakeupReaderMarkdown, parseMakeupSearchHtml, parseMakeupSearchText, rankMakeupImages, makeupImageScore, parseHtmlProduct, rankGenericProductImages, genericProductImageScore, genericCurrentPrice, promotionalCurrentPrice, parseReaderMarkdown, touchAlternateProductUrls, validateAvatarDataUrl, imageDimensionsFromBuffer, priceHistorySummary, shouldRunReaderPriceCheck, reconcileDeterministicPrice, buildAiInspectorEvidence, shouldRunAiProductInspector, productPriceReliable, eligibleCurrentPrices, classifyOpenAiFailure, collectStructuredPriceFacts, sourceMatchesTargetProduct, validateWebPriceDecision };
+export { parseMakeupReaderMarkdown, parseMakeupSearchHtml, parseMakeupSearchText, rankMakeupImages, makeupImageScore, parseHtmlProduct, rankGenericProductImages, genericProductImageScore, genericCurrentPrice, promotionalCurrentPrice, parseReaderMarkdown, touchAlternateProductUrls, touchFreshProductUrls, validateAvatarDataUrl, imageDimensionsFromBuffer, priceHistorySummary, shouldRunReaderPriceCheck, reconcileDeterministicPrice, buildAiInspectorEvidence, shouldRunAiProductInspector, productPriceReliable, eligibleCurrentPrices, classifyOpenAiFailure, collectStructuredPriceFacts, collectTouchInlinePriceFacts, mergeProduct, sourceMatchesTargetProduct, validateWebPriceDecision };
 
 if (process.env.HOCHU_TEST !== '1') {
   initDb().then(() => {

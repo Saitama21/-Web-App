@@ -12,6 +12,8 @@ const {
   shouldRunAiProductInspector,
   productPriceReliable,
   touchAlternateProductUrls,
+  touchFreshProductUrls,
+  mergeProduct,
   classifyOpenAiFailure,
   validateWebPriceDecision,
   sourceMatchesTargetProduct
@@ -52,6 +54,48 @@ test('captured Touch Product/Offer data remains trustworthy when the response bo
   assert.equal(productPriceReliable(result,'touch.com.ua'),true);
   const evidence=buildAiInspectorEvidence(result,TOUCH_URL,'touch.com.ua');
   assert.equal(shouldRunAiProductInspector(result,evidence,'touch.com.ua'),false,'two exact structured sources must spend zero AI calls');
+});
+
+test('Touch exact-SKU inline systems agree on the current price and ignore one stale analytics block',()=>{
+  const html=`<!doctype html><html><head><title>Huion Kamvas 13 Gen3 Black</title>
+    <link rel="canonical" href="${TOUCH_URL}">
+    <script type="application/ld+json">{"@context":"https://schema.org","@type":"Product","name":"Huion Kamvas 13 Gen3 Black","sku":"118636","mpn":"132933","offers":{"@type":"Offer","price":21599,"priceCurrency":"UAH","url":"${TOUCH_URL}"}}</script>
+    </head><body><main class="product-card"><h1>Huion Kamvas 13 Gen3 Black</h1><span class="old_price">21 599 ₴</span>
+    <script>fbq('track','ViewContent',{content_id:'118636',price:14549,value:14549,currency:'UAH'});</script>
+    <script>window.ad_product={id:'132933',price:'14549',url:'${TOUCH_URL}'};</script>
+    <script>eS('ProductPage',{productKey:'118636',price:'14549',isInStock:1});</script>
+    <script>initBanksInItem = function(sum = "14 549 ₴") { return sum; };</script>
+    <script>window.agec_detail_base={id:'118636',price:14499,currency:'UAH'};</script>
+    <img src="https://touch.com.ua/upload/huion.jpg"></main></body></html>`;
+  const result=reconcileDeterministicPrice(parseHtmlProduct(html,TOUCH_URL));
+  assert.equal(result.price,14549);
+  assert.equal(result.priceVerification.status,'STRUCTURED');
+  assert.match(result.priceVerification.source,/touch-inline/);
+  assert.equal(result.priceVerification.evidenceCount,4);
+  assert.equal(result.priceConflict,false);
+  assert.equal(productPriceReliable(result,'touch.com.ua'),true);
+});
+
+test('a verified fresh Touch sale clears a stale conflict inherited from the first response',()=>{
+  const stale={
+    title:'Huion Kamvas 13 Gen3 Black',price:21599,priceConflict:true,
+    priceFacts:[
+      {currentPrice:21599,source:'structured:jsonld-offer',confidence:.91,authoritative:true,evidenceCount:1},
+      {currentPrice:14499,source:'structured:meta-price',confidence:.88,authoritative:true,evidenceCount:1}
+    ],source:['html']
+  };
+  const fresh={
+    price:14549,
+    priceFacts:[{currentPrice:14549,originalPrice:21599,discountAmount:7050,source:'html:sale-triplet'}],
+    source:['touch-fresh-html']
+  };
+  const merged=mergeProduct(stale,fresh);
+  assert.equal(merged.priceConflict,true,'merge preserves the warning until evidence is reconciled');
+  const result=reconcileDeterministicPrice(merged);
+  assert.equal(result.price,14549);
+  assert.equal(result.priceVerification.status,'VERIFIED');
+  assert.equal(result.priceConflict,false);
+  assert.equal(productPriceReliable(result,'touch.com.ua'),true);
 });
 
 test('real Touch sale layout overrides stale Product/Offer price without AI',()=>{
@@ -123,6 +167,17 @@ test('Touch retries the same SKU through its second locale route',()=>{
   assert.equal(urls.length,2);
   assert.equal(urls[0],TOUCH_URL);
   assert.equal(urls[1],TOUCH_URL.replace('/ua/item/','/item/'));
+});
+
+test('Touch fresh probe uses a safe five-minute cache key for both locale routes',()=>{
+  const now=Date.UTC(2026,7,12,0,30,0);
+  const urls=touchFreshProductUrls(TOUCH_URL,now);
+  assert.equal(urls.length,2);
+  assert.equal(new URL(urls[0]).searchParams.get('__hochu_price_probe'),String(Math.floor(now/300_000)));
+  assert.equal(new URL(urls[1]).searchParams.get('__hochu_price_probe'),String(Math.floor(now/300_000)));
+  assert.equal(new URL(urls[0]).pathname,new URL(TOUCH_URL).pathname);
+  assert.equal(new URL(urls[1]).pathname,new URL(TOUCH_URL.replace('/ua/item/','/item/')).pathname);
+  assert.deepEqual(touchFreshProductUrls(TOUCH_URL,now+299_999),urls);
 });
 
 test('Touch reader format with line breaks still verifies the current sale price',()=>{
